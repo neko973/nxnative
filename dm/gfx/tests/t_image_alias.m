@@ -205,6 +205,7 @@ int main(void) { @autoreleasepool {
     // Different offsets, formats, CPU-visible and sparse flags cannot join this family.
     tex_t other=image(&pool,991000,64,64); other.off=10<<20; other.mem=pool.mem+other.off; mtl_tex_init(&other);
     CHECK(!objc_getAssociatedObject(tex_mtl(&other),&g_image_heap_owner_key),"single-description storage stays out of the family heaps (its memory is a recycled heap of its own, rh_texture)");
+    CHECK(tex_mtl(&other).heap!=small.heap,"single-description storage stays out of the family (in a CPU_NO_ACCESS pool it may share the pool's heap, pool_heap_texture)");
     tex_t sparse=image(&pool,991001,128,64); sparse.d.flags|=NVN_TEXTURE_FLAGS_SPARSE; mtl_tex_init(&sparse);
     CHECK(!tex_mtl(&sparse).heap,"sparse images stay outside physical image sharing");
     // A dynamic-resolution depth buffer has no image flag (Ocarina of Time: COMPRESSIBLE alone); its sizes share one allocation. A linear image keeps its own
