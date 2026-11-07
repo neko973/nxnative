@@ -77,6 +77,11 @@ t_refl: t_refl.m ../nvn/nvn_refl.m ../nvn/nvn_refl.h ../nvn/dmsh_chain.h
 	clang -O1 -g -Wall -I../nvn -fobjc-arc -o $@ t_refl.m ../nvn/nvn_refl.m -framework Metal -framework Foundation
 t_hmap: t_hmap.c ../nvn/nvn_hmap.h
 	clang -O1 -Wall -o $@ t_hmap.c
+# The temporal upscaler's camera math on the CPU (nvn_tsr.h), and its motion pass on the GPU against it (dm/gfx/msl/tsr.metal)
+t_tsr: t_tsr.c ../nvn/nvn_tsr.h
+	clang -O1 -Wall -o $@ t_tsr.c
+t_tsr_mv: t_tsr_mv.m ../nvn/nvn_tsr.h ../nvn/host_msl.m ../nvn/host_msl.h $(MSL_H)
+	clang -O1 -g -Wall -I$(dir $(MSL_H)) -fobjc-arc -o $@ t_tsr_mv.m ../nvn/host_msl.m -framework Metal -framework Foundation
 t_cover: t_cover.c ../nvn/nvn_cover.h
 	clang -O1 -Wall -o $@ t_cover.c
 t_pace: t_pace.c ../nvn/nvn_pace.h
