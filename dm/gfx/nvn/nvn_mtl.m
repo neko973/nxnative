@@ -14691,10 +14691,15 @@ static void sub_cut_begin(void) { g_cut_draw0 = g_stat_draw; }
 // DM_FSTEP_PROBE_RAMP=1 (default) / 0 / ab: a frame-step probe's grace is renewed while its frames keep getting cheaper (nvn_fstep.h FSTEP_RAMP), the time macOS's GPU clock takes to rise for the shorter deadline
 static int probe_ramp_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_FSTEP_PROBE_RAMP", 1); return m; }
 int mtl_probe_ramp_on(void) { return sw_on(probe_ramp_mode()); }
+// DM_NVN_CUT_IDLE (on by default; =0 off, =ab alternates): with no command buffer in flight (the GPU has run out of work) a segment is handed over at the next pass boundary
+// whatever its draw count. Ocarina of Time's graphics queue is replayed when its CPU releases the frame (an event wait), with the GPU idle by then; its first segment waited
+// for 128 draws
+static int cut_idle_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_NVN_CUT_IDLE", 1); return m; }
 static void sub_cut(void) {
     int n = cut_draws();
     if (!g_cb || g_enc) return;
-    if ((!g_cut_copy && (n <= 0 || g_stat_draw - g_cut_draw0 < (uint64_t)n)) || g_hoist_n || g_defer_nact || g_defer_pend || g_fz.active || g_rt_merged) return;
+    int idle = n > 0 && g_stat_draw > g_cut_draw0 && atomic_load_explicit(&g_seg_inflight, memory_order_relaxed) == 0 && sw_on(cut_idle_mode());   // DM_NVN_CUT=0 leaves segmented submission off, idle or not
+    if ((!g_cut_copy && !idle && (n <= 0 || g_stat_draw - g_cut_draw0 < (uint64_t)n)) || g_hoist_n || g_defer_nact || g_defer_pend || g_fz.active || g_rt_merged) return;
     // The cut is there so that the GPU does not sit idle while the host encodes. With earlier work still running a commit gains nothing and queues one more command buffer: each is a call into the kernel on Metal's one submission queue, and with buffers queued behind running work
     // the GPU waited 5-40 ms with the next one already committed (docs/reference/frame-rate.md). So it stays a boundary for the game's timestamps (ts_boundary), with the commit left for when the GPU has run out. A copy still commits, as its data must land. DM_NVN_CUT_BUSY=0: every cut commits
     static int busy = -1; if (busy < 0) { const char *e = getenv("DM_NVN_CUT_BUSY"); busy = !e || atoi(e) != 0; }
