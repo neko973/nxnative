@@ -15118,9 +15118,6 @@ static int tsr_encode(NvShader *cs, id<MTLTexture> in, id<MTLTexture> out, const
         if (!tsr_reproj(reset ? c->cam.vp : T.prev_cam.vp, c->cam.vp, depth_zero, R)) why = TSR_W_SINGULAR;
     }
     if (why) { tsr_fallback(why, cw, ch); return 0; }
-    // As the spatial path (up_mfx_encode): a held clear of the image MetalFX writes whole is dead, any other lands first
-    int dwhole = whole && out.width == dout->d.width && out.height == dout->d.height && dout->d.target == NVN_TEXTURE_TARGET_2D && dout->d.levels <= 1 && dout->d.depth <= 1;
-    if (g_dc_mfx && (!dwhole || dout->serial != g_dc.ser)) dc_land("MetalFX does not write all of it");
     zskip_del(dout->serial);
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     ubd_land_compute();
@@ -15147,7 +15144,7 @@ static int tsr_encode(NvShader *cs, id<MTLTexture> in, id<MTLTexture> out, const
     [ce setComputePipelineState:g_tsr_ps];
     MTLSize grid = MTLSizeMake((cw + 15) / 16, (ch + 15) / 16, 1);
     [ce dispatchThreadgroups:grid threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
-    g_gp_disp++; { const int32_t gg[3] = {(int32_t)grid.width, (int32_t)grid.height, 1}; gp_dispatch(ce, TSR_GP_KEY, gg); }
+    g_gp_disp++;
     tsr_debug_copy(ce, cw, ch);
     enc_c_end(ce);
     // The scaler, as dlss_eval: an encoder with the barriers first (MetalFX opens encoders of its own, which take none), then its state and encode on the real command buffer
@@ -15172,7 +15169,6 @@ static int tsr_encode(NvShader *cs, id<MTLTexture> in, id<MTLTexture> out, const
         else if (!copy_t2t_draw(g_tsr_out, out, 0, 0, 0, 0, &o0, orr, 0, 0)) { static int once; if (!once++) MLOG("[RED] temporal upscaling: the result could not be drawn into the game's image (format %lu)", (unsigned long)out.pixelFormat); }
     }
     args_dirty_all();
-    if (dc_on()) { if (g_dc_pending && g_dc_mfx) dc_drop(); g_dc_mfx_ser = dwhole ? dout->serial : 0; }   // the image a waiting clear of is held from now on (dc_hold)
     if (!T.logged_view++) { char s[2048]; tsr_cands_str(s, sizeof s, pick);
         MLOG("temporal upscaling: main view found: the 13568-byte block at uniform slot 0, at %#llx this frame (found again every frame: the address moves), a perspective camera of vertical FOV %.1f deg, aspect %.3f, near %g, far %g, "
              "depth %s (%s mode); %u draws, %u of them into depth ser %llu %ux%u (Depth32Float) for the %ux%u input; first frame %s → %lux%lu at scale %.2f%s; other per-view blocks: %s",
