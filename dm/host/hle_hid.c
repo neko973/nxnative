@@ -239,6 +239,8 @@ static void *ctl_main(void *arg) {
                 if (!strncmp(line, "program ", 8)) { void dm_oe_execute(int index, const void *param, size_t n); LOG("DM_CTL: oe::ExecuteProgram(%d)", atoi(line + 8)); dm_oe_execute(atoi(line + 8), NULL, 0); continue; }
                 if (!strncmp(line, "webshot ", 8)) { void front_web_shot(const char *path); front_web_shot(line + 8); continue; }
                 if (!strncmp(line, "shot ", 5)) { dm_gfx_shot_at(1, line + 5); LOG("DM_CTL: screenshot of the next frame → %s", line + 5); continue; }
+                // "shotk <k> <path>": the kth presented frame from now (a run of consecutive frames for flicker checks: shotk 1 a.png, shotk 2 b.png, ...)
+                if (!strncmp(line, "shotk ", 6)) { char *e2; long k = strtol(line + 6, &e2, 10); while (*e2 == ' ') e2++; if (k > 0 && *e2) { dm_gfx_shot_at(k, e2); LOG("DM_CTL: screenshot of frame +%ld → %s", k, e2); } continue; }
                 if (!strncmp(line, "texlist ", 8)) { void dm_gfx_texlist(int target); dm_gfx_texlist(atoi(line + 8)); continue; }
                 if (!strcmp(line, "restop")) { void dm_gfx_restop(void); dm_gfx_restop(); continue; }   // what the residency set holds (nvn_mtl.m res_top)
                 if (!strncmp(line, "texraw ", 7)) { void dm_gfx_texraw(uint64_t serial, const char *path); char *e2; uint64_t s = strtoull(line + 7, &e2, 10); while (*e2 == ' ') e2++; dm_gfx_texraw(s, e2); continue; }
