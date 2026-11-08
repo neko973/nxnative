@@ -9,28 +9,81 @@ from nso_asm import ADRP, B
 # s0 and x16 / x17 are free there (s0 is written again on every path before it is read; the function uses neither x16 nor x17); s1 keeps the base rate.
 # Lichii (a GPL emulator; only the fact was taken) found the division (its notes: main+0x6E6CC4, 60 / [x21+0x2C8])
 def frame_step(ctx):
+    # Target 0 (DM_FPS_TARGET=0: no host pacing, the game presents as fast as it can) runs the community Dynamic-fps mod for this build
+    # (oot-mac19 773277822, from the mod's IPS for main e0f3ccfaf50065ae4ea01eb5aeb13b1a): the frame's real time from the counter, at most 1/20 s,
+    # smoothed (x += (dt - x) / 8), times the base rate is the ratio whenever it exceeds 1.03 x the game's own, so a slow frame moves the game by the
+    # time it took: real speed at any frame rate, not only at 60 / 30 / 20. Its two u64 (last counter, smoothed interval) live in the state page at
+    # +0x2a0 / +0x2a8 (past the dynamic resolution's +0x200..+0x290; +0x40 is DM_DYNAMIC_RESOLUTION's switch). cntvct_el0 / cntfrq_el0 are readable at
+    # EL0 on macOS. x10-x14, s2, s3 are dead at the site (the mod's own choice), as are x16, x17, s16 and the flags; s1 (base rate) and s0 are only read.
+    # With a target, the host's whole vsyncs as upstream's stub does (step x base / 60, vsyncs counted at +0x30); no step decided yet runs the division.
+    def bcond(frm, to, cond): return 0x54000000 | ((((to - frm) >> 2) & 0x7FFFF) << 5) | cond
+    def cbz(frm, to, rt, x): return (0xB4000000 if x else 0x34000000) | ((((to - frm) >> 2) & 0x7FFFF) << 5) | rt
+    LE = 0xD
     here, emit, fs_site, fs_put, FS_STATE_OFF, base = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state, ctx.base
     site = base + 0xe4
     fs_site(site, '2818201e')   # fdiv s8,s1,s0
-    start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
-    for w in (0xb9400211,   # ldr w17,[x16]          target fps (0 = off)
-              0x340001b1,   # cbz w17,orig (+13)
-              0xb9402211,   # ldr w17,[x16,#0x20]    step in vsyncs
-              0x34000171,   # cbz w17,orig (+11)     not decided yet
-              0x1e230220,   # ucvtf s0,w17
-              0xf9401a10,   # ldr x16,[x16,#0x30]
-              0x8b110210):  # add x16,x16,x17
-        emit(w)
-    emit(ADRP(17, here(), FS_STATE_OFF))
-    for w in (0xf9001a30,   # str x16,[x17,#0x30]    vsyncs stepped
-              0x1e210808,   # fmul s8,s0,s1          step × base rate
-              0x52a84e10,   # mov w16,#0x42700000    60.0
-              0x1e270200,   # fmov s0,w16
-              0x1e201908):  # fdiv s8,s8,s0          / 60
-        emit(w)
-    emit(B(here(), site + 4))
-    emit(0x1e201828); emit(B(here(), site + 4))   # orig: fdiv s8,s1,s0; back
-    fs_put(site, [B(site, start)], 'frame ratio: the host\'s step × base rate / 60 instead of base rate / the game\'s frame rate (state page target fps; 0 = the game\'s ratio)')
+    start = here()
+    ORIG, DYN, DONE = 15, 17, 46
+    code = [
+        ('adrp',),                                        # 0  adrp  x16, state
+        0xbd400210,                                       # 1  ldr   s16, [x16]            target fps (0 = Dynamic-fps)
+        0x1e202208,                                       # 2  fcmp  s16, #0.0
+        ('bcond', DYN, LE),                               # 3  b.le  dyn
+        0xb9402211,                                       # 4  ldr   w17, [x16, #0x20]     the host's step in vsyncs (0 = not decided yet)
+        ('cbz', ORIG, 17, 0),                             # 5  cbz   w17, orig
+        0x1e230230,                                       # 6  ucvtf s16, w17              n
+        0x1e300828,                                       # 7  fmul  s8, s1, s16           base rate x n
+        0x52a84e11,                                       # 8  mov   w17, #0x42700000      60.0f
+        0x1e270230,                                       # 9  fmov  s16, w17
+        0x1e301908,                                       # 10 fdiv  s8, s8, s16           / 60
+        0xb9402211,                                       # 11 ldr   w17, [x16, #0x20]
+        0x9100c210,                                       # 12 add   x16, x16, #0x30
+        0xf831021f,                                       # 13 stadd x17, [x16]            vsyncs stepped (host log)
+        ('b', DONE),                                      # 14 b     done
+        0x1e201828,                                       # 15 orig: fdiv s8, s1, s0       the original
+        ('b', DONE),                                      # 16 b     done
+        0x1e201828,                                       # 17 dyn:  fdiv s8, s1, s0       Dynamic-fps from here
+        0x910a820a,                                       # 18 add   x10, x16, #0x2a0      its state: +0x2a0 last counter, +0x2a8 smoothed interval
+        0xd53be04b,                                       # 19 mrs   x11, cntvct_el0
+        0xf940014c,                                       # 20 ldr   x12, [x10]
+        0xf900014b,                                       # 21 str   x11, [x10]
+        ('cbz', DONE, 12, 1),                             # 22 cbz   x12, done             first frame: nothing to measure
+        0xcb0c016b,                                       # 23 sub   x11, x11, x12         interval in counter ticks
+        0xd53be00d,                                       # 24 mrs   x13, cntfrq_el0
+        0xd280028e,                                       # 25 mov   x14, #20
+        0x9ace09ae,                                       # 26 udiv  x14, x13, x14         1/20 s
+        0xeb0e017f,                                       # 27 cmp   x11, x14
+        0x9a8b81cb,                                       # 28 csel  x11, x14, x11, hi     at most 1/20 s
+        0xf940054c,                                       # 29 ldr   x12, [x10, #8]
+        0xb500004c,                                       # 30 cbnz  x12, +8
+        0xaa0b03ec,                                       # 31 mov   x12, x11              first interval seeds the average
+        0xcb0c016e,                                       # 32 sub   x14, x11, x12
+        0x8b8e0d8c,                                       # 33 add   x12, x12, x14, asr #3 x += (dt - x) / 8
+        0xf900054c,                                       # 34 str   x12, [x10, #8]
+        0x9e230182,                                       # 35 ucvtf s2, x12
+        0x9e2301a3,                                       # 36 ucvtf s3, x13
+        0x1e231842,                                       # 37 fdiv  s2, s2, s3            seconds
+        0x1e210842,                                       # 38 fmul  s2, s2, s1            x base rate = measured ratio
+        0x529ae14e,                                       # 39 movz  w14, #0xd70a
+        0x72a7f06e,                                       # 40 movk  w14, #0x3f83, lsl #16 1.03f (the mod's literal)
+        0x1e2701c3,                                       # 41 fmov  s3, w14
+        0x1e230903,                                       # 42 fmul  s3, s8, s3
+        0x1e232040,                                       # 43 fcmp  s2, s3
+        ('bcond', DONE, LE),                              # 44 b.le  done                  not slower than 1.03 x the game's ratio
+        0x1e204048,                                       # 45 fmov  s8, s2                the measured ratio
+        ('back',),                                        # 46 done: b site + 4
+    ]
+    assert len(code) == 47 and code[ORIG] == 0x1e201828 and code[DYN] == 0x1e201828
+    for i, w in enumerate(code):
+        pc = start + 4 * i
+        if isinstance(w, int): emit(w); continue
+        k = w[0]
+        if k == 'adrp': emit(ADRP(16, pc, FS_STATE_OFF))
+        elif k == 'bcond': emit(bcond(pc, start + 4 * w[1], w[2]))
+        elif k == 'cbz': emit(cbz(pc, start + 4 * w[1], w[2], w[3]))
+        elif k == 'b': emit(B(pc, start + 4 * w[1]))
+        elif k == 'back': emit(B(pc, site + 4))
+    fs_put(site, [B(site, start)], 'frame ratio: the host\'s step x base rate / 60 instead of base rate / the game\'s frame rate; target 0: Dynamic-fps (the measured frame time x the base rate when slower)')
     dynamic_resolution(ctx)
 
 # The game's dynamic resolution (game__gfx__DynamicResolutionParam: LoadThreshold, ReduceCounterMax, IncreaseCounterMax and a list of levels, each a ResolutionReduceScale and a
