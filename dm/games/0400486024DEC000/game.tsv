@@ -49,3 +49,5 @@ draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on
+# The game turns the difference of two raw counter reports into its wind and particle time step at the Switch 2's system counter rate (31.25 MHz). At NVN's 614.4 MHz the step was 19.66 times too large: foliage, leaves and hanging plants moved about 20 times too fast (Kokiri-Kid fork, padsiwono d1eac2653), and on this Mac the ground flipped material in single frames while standing still (ab-29: one-frame pops 10.9% -> 0.004% of pixels, brightness flashes 19.3 -> 0.06)
+gpu_ts_hz	31250000
