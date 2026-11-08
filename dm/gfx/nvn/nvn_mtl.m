@@ -13685,8 +13685,7 @@ static int ndve_scale(id<MTLTexture> in, id<MTLTexture> out, const tex_t *desc) 
     if (in.width != 1920 || in.height != 1080 || out.width != 2560 || out.height != 1440 ||
         !(out.usage & MTLTextureUsageRenderTarget)) return 0;
     zskip_del(desc->serial);
-    sparse_gpu_wrote(desc);
-    mtl_pool_gpu_written(desc->pool);
+    sparse_gpu_wrote(desc);   // (main has no mtl_pool_gpu_written: the other GPU-write sites mark sparse pools only)
     rp_end();
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     ubd_land_compute();
