@@ -2110,6 +2110,7 @@ static _Atomic uint64_t g_itv2_since;   // start of the game's current run of ev
 // Frame step (patch_nso.py FRAME_STEP: Tears of the Kingdom 1.4.3, Breath of the Wild 1.9.0): the game no longer picks an interval. The host hands it each frame's step in whole vsyncs
 // (fstep_tick, nvn_fstep.h) and presents follow the hold k it decides with it
 __attribute__((weak)) uint8_t *dm_fps_state;   // loader.c; graphics unit tests have no loader
+__attribute__((weak)) int dm_fps_ticks;      // loader.c (FRAME_STEP_TICKS: the stub reads a step in ticks of 1/120 s); 0 in graphics unit tests
 __attribute__((weak)) void dm_fps_lock_tick(void) {}   // hle_fpslock.c: engine frame limits in game memory (Monster Hunter Rise); graphics unit tests have no host
 static int g_engine_stub = 1;   // the weak dm_fps_lock_engine's answer, for graphics unit tests (t_nvn sets it)
 __attribute__((weak)) int dm_fps_lock_engine(void) { return g_engine_stub; }   // hle_fpslock.c: the host writes fps_target into an engine limiter of this main
