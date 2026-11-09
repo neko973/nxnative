@@ -1261,6 +1261,15 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** Ocarina of Time, `DM_NVN_FRAG_ORDER=ab DM_AB=300`, 105 s on the bridge with no frame hold: full barriers 90 → 29 a frame, GPU span p50 19.61 → 19.38 ms, 51.2 → 51.8 fps; the picture is unchanged.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
 
+### Draw passes the game does not order run side by side
+
+- **Symptom:** a frame of many small passes takes much longer on the GPU than the sum of its work suggests: Ocarina of Time on an M4 spends about 1.8 ms on 28 cube map prefilter passes down to 1x1, each a handful of fragments that leave the GPU idle, and the frame stays at about 19.3 ms of GPU span (52 fps) while its busy time is far lower.
+- **Cause:** every draw pass ended with a barrier before the next pass's fragment stage (`enc_r_end_pass`), so passes ran one after another even when nothing tied them. NVN orders one pass after another only through a barrier the game sets (`nvnCommandBufferBarrier`), and Metal 4 tracks no hazards, attachments included.
+- **Fix:** general. A draw pass ends with no barrier of its own and the next draw pass decides (`enc_r_begin_pass`): it waits for vertex, mesh and fragment work before its fragments when the game set any barrier since, or when one of its attachments (root texture, level, layers, views resolved to their parent) is an attachment of a pass left unordered before it (`pass_att_clash`, up to 96 kept); otherwise it starts beside them. Every other encoder (copies, dispatches, the host's own passes, MetalFX, the present) already starts with a full barrier. `DM_NVN_PASS_OVERLAP=0` turns it off, `ab` alternates it.
+- **Check:** Ocarina of Time, `DM_NVN_PASS_OVERLAP=ab DM_AB=300`, 105 s on the bridge in Kokiri Forest with no frame hold: about 61 passes a frame begin beside the ones before; GPU span p50 19.31 → 16.66 ms, 51.8 → 60.3 fps. With it always on: 59.5 fps, frames shown p95 16.67 ms; four consecutive screenshots differ by at most 5 of 255 per 16-pixel block (falling leaves), and from a run without it only where things move.
+- **Open:** a game that samples an earlier pass's attachment with no barrier (a race on NVIDIA too) would now show it; `regress.py` on the other games has not been run.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
 ### Metal 4 does not order operations inside one encoder
 
 - **Symptom:** tall blue / textured panels that flickered frame to frame: the fountain's vertex shader pushed the water surface to the top of the screen.
