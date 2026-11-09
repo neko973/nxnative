@@ -1551,6 +1551,11 @@ static void gp_report(int n, gp_lab *lab, uint64_t frame) {   // the frame's las
     MLOG("[gpuprof] frame %llu: render %.2f ms, compute / copy %.2f ms over %d encoders (%d render passes, attachments load %.1f MB store %.1f MB), first start to last end %.2f ms", (unsigned long long)frame, tot[0] / 1e3, tot[1] / 1e3, n, np, ld / 1024.0, st / 1024.0, span / 1e3);
     free(lab); atomic_store(&g_gp_busy, 0);
 }
+// DM_NVN_HEAP_RELAX (on by default; =0 off, =ab alternates): the relaxed draw-pass barriers of DM_NVN_BARRIER=game stay on while image family heaps exist (g_image_heap_n). Their barriers
+// already carry resource-alias visibility (resource_vis). Without it the first family heap turned every draw pass back to full barriers: Ocarina of Time's dynamic-resolution depth
+// buffer makes about 21 of them, so once the families took every compressible image its passes began with 100 full barriers a frame and none saved
+static int heap_relax_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_NVN_HEAP_RELAX", 1); return m; }
+static inline int heaps_block_relax(void) { return g_image_heap_n && !sw_on(heap_relax_mode()); }
 // A game barrier that only orders fragments (NVN_BARRIER_ORDER_FRAGMENTS(_TILED), with texture, descriptor or zcull invalidation) asks that earlier fragments finish before later fragments start,
 // which the relaxed end of the pass before already gives (enc_r_end_pass: vertex, mesh and fragment work before the next fragment, dispatch and copy stages, with visibility): on NVIDIA the next
 // draw's vertex work is not ordered after earlier fragments by it either (that takes ORDER_PRIMITIVES). So only a barrier with other bits makes the next pass wait for everything.
@@ -1559,7 +1564,7 @@ static int frag_order_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM
 // DM_NVN_PASS_OVERLAP (on by default; =0 off, =ab alternates): a draw pass ends with no barrier of its own; the next one waits for the passes before it (vertex, mesh and fragment work before its fragments)
 // only when the game set a barrier since, or when one of its attachments (texture, level, layers) is one of theirs. Without either, NVN does not order the two passes, so the next one's fragments
 // may run beside the earlier ones' (Ocarina of Time: the 7 mips of a cube map prefiltered one draw each, with no barrier between them). Every other encoder starts with a full barrier
-typedef struct { __unsafe_unretained id<MTLTexture> root; uint32_t level, slice0, slice1; } pass_att;
+typedef struct { const void *root; uint32_t level, slice0, slice1; } pass_att;   // root: the texture, or its heap for an image family's texture (all of a family's sit at offset 0 of one heap)
 enum { PASS_ATT_MAX = 96 };
 static pass_att g_cur_att[10], g_pend_att[PASS_ATT_MAX]; static int g_cur_natt, g_pend_natt, g_pend_end; static uint64_t g_bar_overlap;
 static int pass_overlap_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_NVN_PASS_OVERLAP", 1); return m; }
@@ -1567,7 +1572,8 @@ static void pass_att_note(MTLRenderPassAttachmentDescriptor *a, NSUInteger layer
     id<MTLTexture> t = a.texture; if (!t || g_cur_natt >= 10) return;
     NSUInteger lv = a.level, sl = a.slice + a.depthPlane;
     while (t.parentTexture) { lv += t.parentRelativeLevel; sl += t.parentRelativeSlice; t = t.parentTexture; }
-    g_cur_att[g_cur_natt++] = (pass_att){t, (uint32_t)lv, (uint32_t)sl, (uint32_t)(layers > 1 ? UINT32_MAX : sl + 1)};
+    id<MTLHeap> h = t.heap;   // two textures of one image family heap are the same memory: counted as one attachment
+    g_cur_att[g_cur_natt++] = (pass_att){h ? (__bridge const void *)h : (__bridge const void *)t, (uint32_t)lv, (uint32_t)sl, (uint32_t)(layers > 1 ? UINT32_MAX : sl + 1)};
 }
 static int pass_att_clash(void) {   // an attachment of the pass being opened is one of the passes left unordered before it
     if (g_pend_natt >= PASS_ATT_MAX) return 1;
@@ -1584,7 +1590,7 @@ static inline id<MTL4RenderCommandEncoder> enc_r_begin_pass(MTL4RenderPassDescri
         for (int i = 0; i < 8; i++) pass_att_note(d.colorAttachments[i], layers);
         pass_att_note(d.depthAttachment, layers); pass_att_note(d.stencilAttachment, layers);
     }
-    if (g_last_end_relaxed && !gbar && barrier_game() && !g_image_heap_n) {
+    if (g_last_end_relaxed && !gbar && barrier_game() && !heaps_block_relax()) {
         g_bar_skip++;
         if (g_pend_end) {   // the pass before ended with no barrier (pass_overlap_mode)
             if (g_game_barrier || pass_att_clash()) { [e barrierAfterQueueStages:MTLStageVertex | MTLStageObject | MTLStageMesh | MTLStageFragment beforeStages:MTLStageObject | MTLStageMesh | MTLStageFragment visibilityOptions:resource_vis()]; g_pend_natt = 0; }
@@ -1598,7 +1604,7 @@ static inline id<MTL4RenderCommandEncoder> enc_r_begin_pass(MTL4RenderPassDescri
     [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); return e;
 }
 static inline void enc_r_end_pass(id e) {
-    if (!barrier_game() || g_image_heap_n) { m4_end(e); return; }
+    if (!barrier_game() || heaps_block_relax()) { m4_end(e); return; }
     gp_end(e);
     if (sw_on(pass_overlap_mode())) {   // the next draw pass decides (enc_r_begin_pass); every other encoder starts with a full barrier
         for (int i = 0; i < g_cur_natt && g_pend_natt < PASS_ATT_MAX; i++) g_pend_att[g_pend_natt++] = g_cur_att[i];
