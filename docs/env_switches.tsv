@@ -149,6 +149,7 @@ DM_NVN_FB_DEPTH	switch	`0` lets a draw that samples the depth attachment of its 
 DM_NVN_FB_SNAP	switch	Draws that sample a colour attachment of their own render pass: unset, those that write it (or follow a write in the pass) read a snapshot, reused until the game's next barrier; `0` none; `all` a fresh snapshot for every draw that samples one (slow, diagnostic, no tile reads)
 DM_NVN_FB_TILE	switch	`0` makes such draws that sample the attachment at their own pixel (a projective sample at the vertex shader's screen varying) read a snapshot too, instead of the tile
 DM_NVN_FLUSH_FILL	switch	`0` starts a new GPU texture in a CPU-writable pool as zeros; by default one whose storage the game flushed before its first use is filled from that storage once
+DM_NVN_FRAG_ORDER	switch	`0` makes every game barrier wait for all earlier GPU work at the next draw pass, as before; by default a barrier that only orders fragments (`ORDER_FRAGMENTS`, with texture, descriptor or zcull invalidation) relies on the relaxed end of the pass before (`draw_barriers game`); `ab` alternates with `DM_AB`
 DM_NVN_FRAMES	diagnostic	`=<N>` prints the NVN call table frame by frame for the first N frames (default 3)
 DM_NVN_FUSE_CHECK	diagnostic	`=1` checks pass merging in the same frame: renders the merged passes again apart and logs the comparison of the attachments every time
 DM_NVN_GEOMETRY_COLOR	switch	full retains inactive geometry color attachments; default omits them only when attachment bounds and state prove equivalence.

@@ -1253,6 +1253,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `make -C dm/gfx/tests GAME=0400380020056000 check_t_upscaler_mfx`: the classifier on synthetic code in each shape, and an sRGB input, full and as a packed subrectangle, comes out decoded, with linear input at the same sizes not decoded. The classifier against the translated shaders of all 44 variants of the two packs: no mismatch (Bananza 16 linear, 8 kept; Splatoon Raiders 10 sRGB, 10 kept). **Open:** Mario Kart World's 30 variants have not been read; whatever shape they are, an unknown one keeps its shader.
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md) ([#1156](https://github.com/seedds/nxnative/issues/1156)), the first level with `c1b8edc09e3313b1` and `30d8ee33de9dee85`: the washed-out picture reproduced, and with the fix the sky and scene means match the game's upscaler within 0.6 of 255 per channel, against about 50 too high before.
 
+### Barriers that only order fragments
+
+- **Symptom:** a game issues `nvnCommandBufferBarrier` between most of its passes and nearly every pass starts with a full barrier: the residency set line shows `draw-pass entry barriers full` about three times `saved`. Ocarina of Time: about 90 full barriers a frame with `draw_barriers game`.
+- **Cause:** any game barrier made the next pass wait for all earlier GPU work. Most of them are `ORDER_FRAGMENTS | INVALIDATE_TEXTURE` (0x12, about 80 a frame), which on NVIDIA orders earlier fragments before later ones and does not hold the next draw's vertex work (that takes `ORDER_PRIMITIVES`).
+- **Fix:** general. A barrier with only fragment ordering and texture, descriptor or zcull invalidation (`g_game_barrier_full` stays 0) relies on the relaxed end of the pass before (`enc_r_end_pass`: vertex, mesh and fragment work before the next fragment, dispatch and copy stages, with visibility). Any other bit still waits for everything. `DM_NVN_FRAG_ORDER=0` turns it off, `ab` alternates it.
+- **Check:** Ocarina of Time, `DM_NVN_FRAG_ORDER=ab DM_AB=300`, 105 s on the bridge with no frame hold: full barriers 90 → 29 a frame, GPU span p50 19.61 → 19.38 ms, 51.2 → 51.8 fps; the picture is unchanged.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
 ### Metal 4 does not order operations inside one encoder
 
 - **Symptom:** tall blue / textured panels that flickered frame to frame: the fountain's vertex shader pushed the water surface to the top of the screen.
