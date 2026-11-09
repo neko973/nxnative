@@ -4317,8 +4317,13 @@ static nvn_hmap g_pool_heap = {.klen = sizeof(void *)};   // pool object → NvP
 static id<MTLTexture> pool_heap_texture(const tex_t *t, MTLTextureDescriptor *d) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_POOL_HEAP"); on = !e || atoi(e); }
     const pool_t *p = t->pool;
-    if (!on || !p || !p->mem || !(p->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) || (p->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) || nvn_sparse_pool(p)) return nil;
+    // Virtual pools too (DM_NVN_POOL_HEAP_VIRTUAL=0 leaves them out): Ocarina of Time keeps its 305 MB render-target pool virtual (flags 0x2a1); its 570-650 live targets cover
+    // 124 MB of it as the console lays them out, and took 1.4-1.6 GB as targets of their own (rh census). Offsets in a virtual pool are what the game places them by
+    static int virt = -1; if (virt < 0) { const char *e = getenv("DM_NVN_POOL_HEAP_VIRTUAL"); virt = !e || atoi(e); }
+    int is_virt = p && (p->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL);
+    if (!on || !p || (!p->mem && !(is_virt && virt)) || !(p->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) || (is_virt && !virt) || nvn_sparse_pool(p)) return nil;
     if (p->size > POOL_HEAP_MAX || !t->L.size || t->off < 0 || (uint64_t)t->off + t->L.size > p->size || d.storageMode != MTLStorageModePrivate) return nil;
+    if (t->L.size * 10 >= p->size * 9) return nil;   // one texture filling its pool (Ocarina of Time's 288 MB shadow map): a heap a quarter larger would only add memory
     if (!(t->d.flags & NVN_TEXTURE_FLAGS_COMPRESSIBLE) || (t->d.flags & (NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_DISPLAY))) return nil;
     MTLSizeAndAlign need = [g_dev heapTextureSizeAndAlignWithDescriptor:d];
     if (!need.size || !need.align) return nil;
