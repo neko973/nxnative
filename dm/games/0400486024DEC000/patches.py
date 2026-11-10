@@ -6,31 +6,45 @@ from nso_asm import ADRP, B
 # [x21+0x2c8] (fdiv s8,s1,s0 at +0xe4) and hands the result to the time object (main+0x3b4e300: ratio at +0x10, 1 / ratio at +0x14, round(60 / ratio) at +0x1c), which the game
 # steps by; the frame's own time never enters it, so a frame that takes two vsyncs at rate 60 plays at half speed. The stub gives the ratio the host's step instead: step × base / 60
 # (the division's value when the host keeps frames 60 / rate vsyncs), and counts the vsyncs stepped. Until the host has decided a step, and at fps_target 0, the division runs.
+# A step in ticks of 1/120 s (state +0x2c, written by the host at DM_FPS_TARGET=40: hle_nvn.c fs_t120) comes first: ratio = ticks × base / 120, so 3 ticks (40 fps) step the
+# game 1.5 vsyncs, the ratio the game's own division gives at an int rate of 40; those are counted at +0x38 (ticks stepped). The FRAME_STEP_TICKS capability tells the host so
 # s0 and x16 / x17 are free there (s0 is written again on every path before it is read; the function uses neither x16 nor x17); s1 keeps the base rate.
 # Lichii (a GPL emulator; only the fact was taken) found the division (its notes: main+0x6E6CC4, 60 / [x21+0x2C8])
 def frame_step(ctx):
     here, emit, fs_site, fs_put, FS_STATE_OFF, base = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state, ctx.base
     site = base + 0xe4
     fs_site(site, '2818201e')   # fdiv s8,s1,s0
-    start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
-    for w in (0xb9400211,   # ldr w17,[x16]          target fps (0 = off)
-              0x340001b1,   # cbz w17,orig (+13)
-              0xb9402211,   # ldr w17,[x16,#0x20]    step in vsyncs
-              0x34000171,   # cbz w17,orig (+11)     not decided yet
-              0x1e230220,   # ucvtf s0,w17
-              0xf9401a10,   # ldr x16,[x16,#0x30]
-              0x8b110210):  # add x16,x16,x17
+    start = here(); emit(ADRP(16, here(), FS_STATE_OFF))   # 0
+    for w in (0xb9400211,   # 1  ldr w17,[x16]          target fps (0 = off)
+              0x340002d1,   # 2  cbz w17,orig (+22)
+              0xb9402e11,   # 3  ldr w17,[x16,#0x2c]    step in ticks of 1/120 s (0 = none: the step in vsyncs)
+              0x34000111,   # 4  cbz w17,vsyncs (+8)
+              0x1e230220,   # 5  ucvtf s0,w17
+              0xf9401e10,   # 6  ldr x16,[x16,#0x38]
+              0x8b110210):  # 7  add x16,x16,x17
         emit(w)
-    emit(ADRP(17, here(), FS_STATE_OFF))
-    for w in (0xf9001a30,   # str x16,[x17,#0x30]    vsyncs stepped
-              0x1e210808,   # fmul s8,s0,s1          step × base rate
-              0x52a84e10,   # mov w16,#0x42700000    60.0
-              0x1e270200,   # fmov s0,w16
-              0x1e201908):  # fdiv s8,s8,s0          / 60
+    emit(ADRP(17, here(), FS_STATE_OFF))   # 8
+    for w in (0xf9001e30,   # 9  str x16,[x17,#0x38]    ticks stepped
+              0x52a85e10,   # 10 mov w16,#0x42f00000    120.0
+              0x14000009,   # 11 b ratio (+9)
+              0xb9402211,   # 12 vsyncs: ldr w17,[x16,#0x20]    step in vsyncs
+              0x34000171,   # 13 cbz w17,orig (+11)     not decided yet
+              0x1e230220,   # 14 ucvtf s0,w17
+              0xf9401a10,   # 15 ldr x16,[x16,#0x30]
+              0x8b110210):  # 16 add x16,x16,x17
         emit(w)
-    emit(B(here(), site + 4))
-    emit(0x1e201828); emit(B(here(), site + 4))   # orig: fdiv s8,s1,s0; back
-    fs_put(site, [B(site, start)], 'frame ratio: the host\'s step × base rate / 60 instead of base rate / the game\'s frame rate (state page target fps; 0 = the game\'s ratio)')
+    emit(ADRP(17, here(), FS_STATE_OFF))   # 17
+    for w in (0xf9001a30,   # 18 str x16,[x17,#0x30]    vsyncs stepped
+              0x52a84e10,   # 19 mov w16,#0x42700000    60.0
+              0x1e210808,   # 20 ratio: fmul s8,s0,s1   step × base rate
+              0x1e270200,   # 21 fmov s0,w16
+              0x1e201908):  # 22 fdiv s8,s8,s0          / 120 or / 60
+        emit(w)
+    emit(B(here(), site + 4))   # 23
+    assert here() == start + 24 * 4, 'frame ratio stub: the branch offsets above count 24 words before orig'
+    emit(0x1e201828); emit(B(here(), site + 4))   # 24 orig: fdiv s8,s1,s0; back
+    fs_put(site, [B(site, start)], 'frame ratio: the host\'s step × base rate / 60 (or its ticks of 1/120 s × base / 120) instead of base rate / the game\'s frame rate (state page target fps; 0 = the game\'s ratio)')
+    ctx.capabilities.add('FRAME_STEP_TICKS')
     dynamic_resolution(ctx)
 
 # The game's dynamic resolution (game__gfx__DynamicResolutionParam: LoadThreshold, ReduceCounterMax, IncreaseCounterMax and a list of levels, each a ResolutionReduceScale and a
