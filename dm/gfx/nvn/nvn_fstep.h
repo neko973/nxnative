@@ -49,6 +49,7 @@ typedef struct {
     double pa, pb; int plate, ptotal;   // the current grace window: the cost of its first and second halves (sums), its late frames; grace frames this probe has taken in all
     double hold, since;       // vsyncs a trial waits for after a step up; vsyncs since the last step up
     int kcap;                 // set by the caller: the largest step (FSTEP_MAX when 0); 40 fps in ticks of 1/120 s (hle_nvn.c fs_t120) takes 6
+    double up_tol;            // set by the caller: a step up takes the hold the cost is within this of (0 = late_tol, or 0.05): the tolerance of the hold it would move to
     double late_tol;          // set by the caller: what a frame may take over its hold before it is late, in the caller's unit (0 = FSTEP_LATE). In ticks of 1/120 s FSTEP_LATE is
                               // 0.83 ms, half the 1.7 ms it stands for: Ocarina of Time's village (GPU 22-24.5 ms, frames 24-26.5 ms) left hold 3 for 4 on frames of 25.6-26.5 ms
                               // and a failed probe stepped up to 4 at a cost of 3.07 ticks, so 38% of a walk ran at 30 fps that runs at 40 uncapped (hle_nvn.c fs_t120 sets 0.2)
@@ -124,7 +125,7 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
         if (!late && fits) { s->ccur = s->cn ? s->ccur + (cost - s->ccur) / 8 : cost; s->cn++; }
     }
     if (s->late_run >= 3 && s->k < kmax) {   // step up to the cost, at least one vsync
-        int want = (int)ceil(cost - (s->late_tol > 0 ? s->late_tol : 0.05));   // a cost within the tolerance of a hold takes that hold
+        int want = (int)ceil(cost - (s->up_tol > 0 ? s->up_tol : s->late_tol > 0 ? s->late_tol : 0.05));   // a cost within the tolerance of a hold takes that hold
         if (want < s->k + 1) want = s->k + 1;
         if (want > kmax) want = kmax;
         if (s->trial || (s->probe == 2 && s->since < hold_max)) { s->failed++; s->trial = 0; s->hold = s->hold * 2 < hold_max ? s->hold * 2 : hold_max; }

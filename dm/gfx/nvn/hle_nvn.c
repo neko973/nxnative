@@ -2373,7 +2373,10 @@ static void fstep_tick(const win_t *o, int c) {
     // (Breath of the Wild on an M5 Pro: the probe's 33 frames took the clock 338 → 432 MHz and its GPU time 24.8 → 18.5 ms, then it failed at 22 ms frames; hold 1 needed about 560 MHz)
     g_fs.ramp = mtl_probe_ramp_on();
     g_fs.per_vsync = fstep_hz() / 60;
-    g_fs.late_tol = fs_t120() ? 2 * FSTEP_LATE : 0;   // ticks of 1/120 s: the same 1.7 ms as in vsyncs
+    // Ticks of 1/120 s: the same 1.7 ms as in vsyncs at hold 2 (60 fps: a scene that misses it runs evenly at 40). From hold 3 (40 fps) the next hold is 30 fps, a quarter
+    // fewer frames, so frames up to 3.3 ms over still keep the hold: they are shown as soon as they are ready (mtl_link_wait_ticks does not wait for a tick already past) and the
+    // step pays the time back. Ocarina of Time's Kokiri village at full resolution on an M3 Pro (GPU 22 ms, frames 24-27 ms): 60-67% of a walk at 40 fps and the rest at 30 before
+    g_fs.late_tol = fs_t120() ? (g_fs.k >= 3 ? 4 : 2) * FSTEP_LATE : 0; g_fs.up_tol = fs_t120() ? 4 * FSTEP_LATE : 0;
     g_fs.kcap = fs_t120() ? 6 : 0;   // 40 fps: steps up to 6 ticks (3 vsyncs, as in whole vsyncs), so hold 4 can still pay back
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + (fs_t120() ? 0x2c : 0x20)), (uint32_t)n, __ATOMIC_RELAXED);   // 40 fps: the step in ticks of 1/120 s (the stub reads +0x2c first)
