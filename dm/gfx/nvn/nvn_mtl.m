@@ -9452,9 +9452,10 @@ static void warm_enqueue(WarmItem *item) {
     os_unfair_lock_unlock(&g_warm_lock);
 }
 // The lists' lines as tasks; *lines: the lines they hold
+static int ndve_engine_key(const char *key); static void ndve_prestart(void);   // nvn_ndve.inc
 static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) {
     NSMutableArray<WarmTask *> *tasks = [NSMutableArray array]; NSMutableDictionary<NSString *, WarmTask *> *pairs = [NSMutableDictionary dictionary];
-    NSMutableSet<NSString *> *seen = [NSMutableSet set], *stale = [NSMutableSet set]; long n = 0;
+    NSMutableSet<NSString *> *seen = [NSMutableSet set], *stale = [NSMutableSet set]; long n = 0, ndve_rows = 0;
     NSMutableSet<NSData *> *seen_k = [NSMutableSet set];   // rows recorded before pso_key_norm that are one pipeline now
     for (NSString *path in paths) {
         NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
@@ -9468,6 +9469,7 @@ static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) 
             WarmTask *t = nil;
             if (([c[0] isEqualToString:@"S"] && c.count >= 3) || ([c[0] isEqualToString:@"C"] && c.count >= 2)) {
                 if (!c[1].length || warm_stale(c[1], stale)) continue;
+                if ([c[0] isEqualToString:@"C"] && ndve_engine_key(c[1].UTF8String)) { ndve_rows++; continue; }   // run by the host's NDVE engine: never built (ndve_engine_key)
                 t = [WarmTask new]; t->kind = [c[0] isEqualToString:@"S"] ? 0 : 2; t->key = c[1]; t->stage = t->kind ? 5 : c[2].intValue; [tasks addObject:t];
             } else if ([c[0] isEqualToString:@"R"] && c.count >= 2) {
                 pso_skey sk; if (pso_skey_parse(c[1].UTF8String, &sk)) continue;
@@ -9496,6 +9498,7 @@ static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) 
             n++;
         }
     }
+    if (ndve_rows) MLOG("pipeline prewarm: %ld compute rows of the movie network left unbuilt (the host's NDVE engine runs it in their place)", ndve_rows);
     *lines = n; return tasks;
 }
 static void warm_task(WarmTask *t) {
@@ -9659,6 +9662,7 @@ static void warm_start(void) {
     }
     warm_load_begin();
     pso4_init();   // the pipeline archive opens before the prewarm builds from it
+    ndve_prestart();   // the NDVE engine's kernels, in the background: ready before the movie's first frame
     g_warm_t0 = bp_now();
     atomic_store(&g_warm_running, 1);
     if (prepare_on()) {
@@ -14006,6 +14010,17 @@ static id<MTL4ComputeCommandEncoder> dispatch_enc(int game) {
     args_dirty_all();
     return e;
 }
+// A compute shader's pipeline, built on the submit thread at its first dispatch that runs (recorded for the next launch's prewarm); nil when Metal refuses it (logged, and its
+// dispatches skipped from then on)
+static id<MTLComputePipelineState> cs_pipeline(NvShader *cs, const void *k) {
+    NSError *e = nil; uint64_t bt = bp_now(); id<MTLComputePipelineState> ps = cps_new(cs->fn, &e);
+    g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
+    if (!ps) { cs->cps_failed = 1; MLOG("[RED] failed to create compute pipeline for %s: %s (its dispatches are skipped)", cs->key, e.localizedDescription.UTF8String); return nil; }
+    pso_record("C\t%s\n", cs->key);
+    if (cs->key[0]) pso_user_record("C\t%s\n", cs->key);
+    hm_put_id(&g_cps, &k, ps);
+    return ps;
+}
 static void dispatch(const p_dispatch *dp) {
     zskip_clear();
     g_wr_epoch++; g_mdx_epoch++;
@@ -14018,16 +14033,10 @@ static void dispatch(const p_dispatch *dp) {
     if (!cs) { RED_ONCE(28, "the dispatched program has no compute shader (or it is not mapped)"); return; }
     const void *k = (__bridge const void *)cs;
     id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
-    if (!ps) {
-        if (cs->cps_failed) return;   // the same function fails the same way: asked again at every dispatch, Mario Kart World's refused shaders took 3,138 pipeline builds in 60 s
-        NSError *e = nil; uint64_t bt = bp_now(); ps = cps_new(cs->fn, &e);
-        g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
-        if (!ps) { cs->cps_failed = 1; MLOG("[RED] failed to create compute pipeline for %s: %s (its dispatches are skipped)", cs->key, e.localizedDescription.UTF8String); return; }
-        pso_record("C\t%s\n", cs->key);
-        if (cs->key[0]) pso_user_record("C\t%s\n", cs->key);
-        hm_put_id(&g_cps, &k, ps);
-    }
+    if (!ps && cs->cps_failed) return;   // the same function fails the same way: asked again at every dispatch, Mario Kart World's refused shaders took 3,138 pipeline builds in 60 s
+    // The pipeline is built at the latest point (cs_pipeline): a dispatch the NDVE engine or MetalFX takes over below runs none of the game's, and builds none
     if (cs->builtin) {   // Built-in compute kernel: n = uniform buffer 0, src = storage buffer 0, dst = storage buffer 1
+        if (!ps && !(ps = cs_pipeline(cs, k))) return;
         const p_bind_buf *u = &S.ubo[5][0], *a0 = &S.ssbo[5][0], *a1 = &S.ssbo[5][1];
         void *ub, *sb, *db; uint64_t uo, so, dof;
         if (!mtl_addr(u->addr, 4, &ub, &uo) || !mtl_addr(a0->addr, 8, &sb, &so) || !mtl_addr(a1->addr, 8, &db, &dof)) { RED_ONCE(30, "embedded compute kernel %s does not have all its buffers bound", cs->builtin); return; }
@@ -14053,6 +14062,7 @@ static void dispatch(const p_dispatch *dp) {
     image_prepare(prog_get(S.cprog), 0x20);
     if (ndve_engine_dispatch(cs, dp)) return;   // nn::ndve's movie network as the host's kernels (DM_NDVE_ENGINE=1)
     if (up_mfx_wanted(cs) && !dp->ind && up_mfx_encode(cs)) return;   // the game's upscaler, drawn by MetalFX instead (DM_UPSCALER=metalfx)
+    if (!ps && !(ps = cs_pipeline(cs, k))) return;
     // Threadgroup memory past Metal's 32 KB, in a device buffer (dmsh_rewrite.py tg_spill): a slice for every workgroup of the grid. An indirect dispatch's grid is in GPU memory, written earlier
     // in the frame: the replay waits for the GPU (as an indirect-count multi-draw does, mdi_wait) and reads it. Mario Kart World's spilled dispatches are all direct, of 1 to 3 workgroups
     uint64_t tg_groups = 0;

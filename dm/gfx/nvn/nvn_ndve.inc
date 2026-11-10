@@ -64,6 +64,15 @@ static int ndve_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_NDVE_
 // DM_NDVE_ENGINE=check: the game's dispatches run, and the engine computes the same frame beside them into images of its own, compared with the game's (logged every 300 frames)
 static int ndve_check(void) { static int c = -1; if (c < 0) { const char *e = getenv("DM_NDVE_ENGINE"); c = e && !strcmp(e, "check"); if (c) MLOG("DM_NDVE_ENGINE=check: the game's movie network runs, and the host's beside it, compared"); } return c; }
 static int ndve_index(NvShader *cs, int from) { for (int i = from; i < NDVE_N; i++) if (!strncmp(cs->key, k_ndve_keys[i], 16)) return i; return -1; }
+// 1 for a key the engine stands in for (the network's dispatches after the colour conversion, and the resampler) while it is on (not ab, not check): the prewarm leaves its
+// C row unbuilt (warm_parse), and a dispatch the engine takes builds no pipeline for it (dispatch builds the game's only for a dispatch that runs). The translated U-Net's
+// HMMA convolutions are the slowest compute pipelines of the game to build: Ocarina of Time's first movie frame waited 128 s for them on an M3 Pro (11-10, gnf11), and the
+// first run with an empty archive was still waiting after 4 minutes, all for dispatches the engine then skipped
+static int ndve_engine_key(const char *key) {
+    if (!key || ndve_mode() != 1 || ndve_check()) return 0;
+    for (int i = 1; i < NDVE_N; i++) if (!strncmp(key, k_ndve_keys[i], 16)) return 1;
+    return 0;
+}
 // Pipelines and tensors, made once in the background; the game's dispatches run until they are ready
 static void ndve_build(void) {
     int z = 0; if (!atomic_compare_exchange_strong(&g_nd.state, &z, 1)) return;
@@ -101,6 +110,15 @@ static void ndve_build(void) {
         g_nd.state = 2;
         MLOG("NDVE engine ready: nn::ndve's movie network (12 dispatches after the colour conversion) runs as the host's kernels (DM_NDVE_ENGINE=0 runs the game's)");
     } });
+}
+// Started with the prewarm (warm_start), so the kernels are ready long before the movie; built at the movie's first dispatch otherwise
+static void ndve_prestart(void) { if (g_res && ndve_mode() == 1 && !ndve_check()) ndve_build(); }
+// The first network dispatch found the engine still building: waiting for its kernels (seconds at most) is shorter than building the game's network, which then runs
+static void ndve_wait(void) {
+    const uint64_t t0 = bp_now();
+    while (atomic_load(&g_nd.state) == 1 && bp_now() - t0 < 15000000000ull) usleep(1000);
+    MLOG("%sNDVE engine: the first network dispatch waited %.1f ms for the engine's kernels (%s)", g_nd.state == 2 ? "" : "[RED] ", (bp_now() - t0) / 1e6,
+         g_nd.state == 2 ? "ready" : "not ready: the game's network runs");
 }
 static int ndve_fail(NvShader *cs, const char *why) {
     if (g_nd.pos > 1) { g_nd.off = 1; MLOG("[RED] NDVE engine: %s at %s after %d of the network's dispatches were skipped; the engine is off from now on (this frame's movie picture is not updated)", why, cs->key, g_nd.pos - 1); }
@@ -227,7 +245,7 @@ static int ndve_engine_dispatch(NvShader *cs, const p_dispatch *dp) {
         return !chk;
     }
     // dispatch i of the sequence: the keys repeat (a8b4, e6be, 0a56 twice), so position decides
-    if (g_nd.pos == 0) { if (i != 1) return 0; if (g_nd.state != 2) return 0; }
+    if (g_nd.pos == 0) { if (i != 1) return 0; if (g_nd.state == 1) ndve_wait(); if (g_nd.state != 2) return 0; }
     else if (ndve_index(cs, g_nd.pos) != g_nd.pos) return ndve_fail(cs, "a dispatch out of the network's order");
     const int p = g_nd.pos ? g_nd.pos : 1;
     const p_bind_buf *w = &S.ssbo[5][2], *b = &S.ssbo[5][3];
