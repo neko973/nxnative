@@ -49,6 +49,9 @@ typedef struct {
     double pa, pb; int plate, ptotal;   // the current grace window: the cost of its first and second halves (sums), its late frames; grace frames this probe has taken in all
     double hold, since;       // vsyncs a trial waits for after a step up; vsyncs since the last step up
     int kcap;                 // set by the caller: the largest step (FSTEP_MAX when 0); 40 fps in ticks of 1/120 s (hle_nvn.c fs_t120) takes 6
+    double late_tol;          // set by the caller: what a frame may take over its hold before it is late, in the caller's unit (0 = FSTEP_LATE). In ticks of 1/120 s FSTEP_LATE is
+                              // 0.83 ms, half the 1.7 ms it stands for: Ocarina of Time's village (GPU 22-24.5 ms, frames 24-26.5 ms) left hold 3 for 4 on frames of 25.6-26.5 ms
+                              // and a failed probe stepped up to 4 at a cost of 3.07 ticks, so 38% of a walk ran at 30 fps that runs at 40 uncapped (hle_nvn.c fs_t120 sets 0.2)
     int per_vsync;            // set by the caller: the ticks a 1/60 s vsync is (0 = 1). At 120 fps the unit is 1/120 s (hle_nvn.c fps_high), and the waits between trials stay the same real time
     double shown_slack;       // vsyncs a frame on time may show longer than k (set by the caller): one refresh on screens whose rate is not a multiple of 60; the cost keeps FSTEP_LATE
     int screen;               // set by the caller before each call, then cleared: 0 = judge lateness by shown and cost; 1 = the screen showed a recent frame on time, 2 = late. With present
@@ -95,7 +98,8 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     if (s->k > kmax) s->k = kmax;
     s->kmin = kmin;
     int scr = s->screen; s->screen = 0;
-    int late = scr ? scr == 2 : shown > held + FSTEP_LATE + s->shown_slack || cost > held + FSTEP_LATE, grace = s->grace > 0;
+    const double ltol = s->late_tol > 0 ? s->late_tol : FSTEP_LATE;
+    int late = scr ? scr == 2 : shown > held + ltol + s->shown_slack || cost > held + ltol, grace = s->grace > 0;
     if (grace && !cap_probe) {   // the completed frame at the old cap does not consume the new hold's grace
         if (s->grace > FSTEP_GRACE / 2) s->pa += cost; else s->pb += cost;
         s->plate += late; s->ptotal++;
@@ -120,7 +124,7 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
         if (!late && fits) { s->ccur = s->cn ? s->ccur + (cost - s->ccur) / 8 : cost; s->cn++; }
     }
     if (s->late_run >= 3 && s->k < kmax) {   // step up to the cost, at least one vsync
-        int want = (int)ceil(cost - 0.05);
+        int want = (int)ceil(cost - (s->late_tol > 0 ? s->late_tol : 0.05));   // a cost within the tolerance of a hold takes that hold
         if (want < s->k + 1) want = s->k + 1;
         if (want > kmax) want = kmax;
         if (s->trial || (s->probe == 2 && s->since < hold_max)) { s->failed++; s->trial = 0; s->hold = s->hold * 2 < hold_max ? s->hold * 2 : hold_max; }

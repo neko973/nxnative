@@ -2168,7 +2168,12 @@ static int fs_t120(void) {
     if (v < 0) {
         const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
         v = t == 40 && dm_fps_state && dm_fps_ticks;
-        if (v) LOG("[nvn] 40 fps: the frame step counts in ticks of 1/120 s on a 120 Hz link (hold 3 = 40 fps, 4 = 30), the game steps by the ticks (FRAME_STEP_TICKS)");
+        // DM_FPS_TARGET=60 with DM_FPS_TICKS=1: the same ticks from hold 2 (60 fps) up, so a scene that does not hold 60 runs at 40 before 30 (in whole vsyncs it goes
+        // straight to 30). Ocarina of Time on an M3 Pro (14-core GPU): houses hold 60, Hyrule Field 40 (GPU 19 ms), the Kokiri village 30-40 (GPU 23 ms)
+        const char *tk = getenv("DM_FPS_TICKS");
+        if (!v && t == 60 && tk && !strcmp(tk, "1")) { v = dm_fps_state && dm_fps_ticks ? 2 : 0; if (!v) LOG("[RED] DM_FPS_TICKS=1: this build's frame step stub takes whole vsyncs only (no FRAME_STEP_TICKS)"); }
+        if (v == 1) LOG("[nvn] 40 fps: the frame step counts in ticks of 1/120 s on a 120 Hz link (hold 3 = 40 fps, 4 = 30), the game steps by the ticks (FRAME_STEP_TICKS)");
+        if (v == 2) LOG("[nvn] 60 fps in ticks: the frame step counts in ticks of 1/120 s on a 120 Hz link (hold 2 = 60 fps, 3 = 40, 4 = 30), the game steps by the ticks (DM_FPS_TICKS, FRAME_STEP_TICKS)");
         __atomic_store_n(&g_fs_t120, v, __ATOMIC_RELAXED);
     }
     return v;
@@ -2180,7 +2185,7 @@ static void t120_tick(void) {
     static int win = -1, link_env = -1, was = -1;
     if (win < 0) { win = mtl_display_hz() != 0; link_env = getenv("DM_PRESENT_LINK") != NULL; }
     int ok = !win || front_screen_max_fps() >= 120;
-    if (ok != was) { LOG("[nvn] 40 fps: %s", ok ? "the screen shows 120 Hz, 40 fps on the 120 Hz link" : "the screen is below 120 Hz: 30 fps on the 60 Hz link"); was = ok; }
+    if (ok != was) { LOG("[nvn] %s: %s", fs_t120() == 2 ? "60 fps in ticks" : "40 fps", ok ? "the screen shows 120 Hz, steps of 1/120 s on the 120 Hz link" : "the screen is below 120 Hz: 30 fps on the 60 Hz link"); was = ok; }
     atomic_store(&g_t120_ok, ok);
     if (!link_env) mtl_link_mode_set(ok ? 2 : 1);
 }
@@ -2200,7 +2205,7 @@ static int fps_step_cap(void) {
     // Movies and a 30 fps target still need thermal samples: heat must reset the
     // calm interval, and cooling during those caps counts towards recovery.
     int thermal = thermal_capped();
-    if (fs_t120()) return dm_movie_playing() || t <= 30 || thermal || !atomic_load(&g_t120_ok) ? 30 : 40;
+    if (fs_t120()) return dm_movie_playing() || t <= 30 || thermal || !atomic_load(&g_t120_ok) ? 30 : fs_t120() == 2 ? 60 : 40;
     return dm_movie_playing() || t <= 30 || thermal ? 30 : 60;   // a movie: its player takes a picture per game frame, paced for the Switch's 30 (hle_movie.c)
 }
 static int fstep_on(void) { return fps_step_cap() != 0; }   // the host decides the steps in whole vsyncs
@@ -2368,6 +2373,7 @@ static void fstep_tick(const win_t *o, int c) {
     // (Breath of the Wild on an M5 Pro: the probe's 33 frames took the clock 338 → 432 MHz and its GPU time 24.8 → 18.5 ms, then it failed at 22 ms frames; hold 1 needed about 560 MHz)
     g_fs.ramp = mtl_probe_ramp_on();
     g_fs.per_vsync = fstep_hz() / 60;
+    g_fs.late_tol = fs_t120() ? 2 * FSTEP_LATE : 0;   // ticks of 1/120 s: the same 1.7 ms as in vsyncs
     g_fs.kcap = fs_t120() ? 6 : 0;   // 40 fps: steps up to 6 ticks (3 vsyncs, as in whole vsyncs), so hold 4 can still pay back
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + (fs_t120() ? 0x2c : 0x20)), (uint32_t)n, __ATOMIC_RELAXED);   // 40 fps: the step in ticks of 1/120 s (the stub reads +0x2c first)
