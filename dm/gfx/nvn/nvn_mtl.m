@@ -13555,7 +13555,10 @@ static int cshoist_on(void) { static int m = -1; if (m < 0) { const char *e = ge
 typedef struct { uint64_t lo, hi; } csh_rng;
 enum { CSH_RN = 1024, CSH_MAX = 64 };
 static const uint8_t *g_csh_op[CSH_MAX]; static int g_csh_n; static uint64_t g_csh_moved, g_csh_depth, g_csh_stop[8], g_csh_stop_op[OP_COUNT_]; static uint32_t g_csh_pre_op;   // dispatches run ahead and not yet met by replay; moved, of them sampling the pass's depth; why scans stopped
-static int csh_bar_pass(void) { static int m = -1; if (m < 0) { const char *e = getenv("DM_NVN_CSH_BARRIER"); m = !(e && !strcmp(e, "0")); if (!m) MLOG("DM_NVN_CSH_BARRIER=0: game barriers between the draws of a pass stop the compute hoist's scan"); } return m; }   // see cs_hoist_try
+// DM_NVN_CSH_BARRIER (off by default, =1 on): game barriers between the draws of a pass do not stop the compute hoist's scan. Off here although PR #1952 (AdyaGMD) had it on: with it on a dispatch
+// moves ahead of the pass past an explicit barrier, which t_perf_order's "explicit game barrier prevents hoist" check rules out (it fails with the switch on). The PR measured 760-900 dispatches moved
+// per 300 frames, heavy submissions 30-35 -> 25-27 ms of GPU and heavy-area play 18-22 -> 27-30 fps on an M1 (Ocarina of Time, 1366x768) with it, so it is worth an A/B run before changing the default
+static int csh_bar_pass(void) { static int m = -1; if (m < 0) { const char *e = getenv("DM_NVN_CSH_BARRIER"); m = e && strcmp(e, "0"); if (m) MLOG("DM_NVN_CSH_BARRIER=%s: game barriers between the draws of a pass do not stop the compute hoist's scan (not covered by t_perf_order's barrier check)", e); } return m; }   // see cs_hoist_try
 static int csh_take(const uint8_t *p) { for (int i = 0; i < g_csh_n; i++) if (g_csh_op[i] == p) { g_csh_op[i] = g_csh_op[--g_csh_n]; return 1; } return 0; }
 static int csh_add(csh_rng *r, int *n, uint64_t a, uint64_t sz) {
     if (!a) return 1;
@@ -13674,7 +13677,7 @@ static void cs_hoist_try(NvProg *pr0, const p_draw *dw0, const p_draw_idx *di0) 
         // against what runs after. What the moved dispatch could depend on is covered without it: the draws before it in the stretch write no memory (csh_draw_reads) and no
         // attachment it samples (colour refused by csh_cs, depth by dwrote); dispatches moved ahead keep a barrier between each other (dispatch_enc records every dispatch as writing
         // everything); and the pass that opens after them starts behind a full barrier (m4_end clears g_last_end_relaxed). Replay still runs the barrier where it was, for the draws
-        // after it. DM_NVN_CSH_BARRIER=0 stops the scan there as before
+        // after it. Only with DM_NVN_CSH_BARRIER=1; by default the scan stops there
         if (hq.op == OP_BARRIER) { uint32_t bits; memcpy(&bits, aq, sizeof bits); if (bits && !csh_bar_pass()) { g_csh_stop[5]++; g_csh_stop_op[hq.op]++; break; } continue; }
         if (hq.op == OP_REPORT_COUNTER || hq.op == OP_RESET_COUNTER) { uint64_t t, ad = 0; memcpy(&t, aq, 8); if (hq.op == OP_REPORT_COUNTER) memcpy(&ad, (const uint8_t *)aq + 8, 8);
             if (t != NVN_COUNTER_TYPE_SAMPLES_PASSED || (ad && !csh_add(csh_rep, &nrep, ad, 16))) { g_csh_stop[5]++; g_csh_stop_op[hq.op]++; break; }
