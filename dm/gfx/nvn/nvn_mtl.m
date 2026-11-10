@@ -318,7 +318,8 @@ static char g_image_heap_owner_key;
 // nothing it reads depends on the reuse; the memory was the old texture's only up to that texture's last use, which completed, as with memory Metal frees and hands out again, so no
 // alias flush is added (resource_vis). Heaps idle for RH_IDLE_NS, and the oldest past RH_CAP bytes waiting, leave the residency set when a submission begins (rh_trim).
 // DM_NVN_RT_RECYCLE=0 makes each target its own allocation as before; ab alternates it with the DM_AB phases
-enum { RH_CAP = 256u << 20 }; static const uint64_t RH_IDLE_NS = 3000000000ull;
+static uint64_t rh_cap(void) { static uint64_t v; if (!v) { const char *e = getenv("DM_NVN_RT_RECYCLE_CAP_MB"); long m = e ? atol(e) : 128; v = (uint64_t)(m > 0 ? m : 128) << 20; } return v; }   // waiting heaps kept (was 256 MB; 128 by default here: DM_NVN_RT_RECYCLE_CAP_MB)
+static const uint64_t RH_IDLE_NS = 3000000000ull;
 typedef struct { void *heap; uint64_t size, t; } rh_ent;   // heap: retained (CFBridgingRetain); t: when it began to wait
 static os_unfair_lock g_rh_lk = OS_UNFAIR_LOCK_INIT; static rh_ent *g_rh; static unsigned g_rh_n, g_rh_cap; static uint64_t g_rh_bytes;
 static _Atomic uint64_t g_rh_made, g_rh_reused, g_rh_trimmed;   // for the memory readout
@@ -379,7 +380,7 @@ static void rh_trim(void) {
     os_unfair_lock_lock(&g_rh_lk);
     while (g_rh_n && nd < 64) {
         unsigned old = 0; for (unsigned i = 1; i < g_rh_n; i++) if (g_rh[i].t < g_rh[old].t) old = i;
-        if (now - g_rh[old].t < RH_IDLE_NS && g_rh_bytes <= RH_CAP) break;
+        if (now - g_rh[old].t < RH_IDLE_NS && g_rh_bytes <= rh_cap()) break;
         drop[nd++] = g_rh[old].heap; g_rh_bytes -= g_rh[old].size; g_rh[old] = g_rh[--g_rh_n];
     }
     os_unfair_lock_unlock(&g_rh_lk);
@@ -1379,13 +1380,14 @@ static uint64_t g_sub_serial;   // Submission index (used by the parallel precom
 void mtl_prepare(void) {
     if (!g_warm_started && prepare_on()) { mtl_init(); shmap_load(); }
 }
-static void sub_cut_begin(void); static void ts_sub_begin(void), ts_boundary(void); static int ts_on(void);
+static void sub_cut_begin(void); static void ts_sub_begin(void), ts_boundary(void); static int ts_on(void); static void up_trim(void);
 static void gmem_commit_patch(void);   // the raw pool table words of the arguments encoded so far follow the pools (gmem_slot_note)
 void mtl_sub_begin(void) {
     mtl_init(); g_sub_serial++; g_seg = 0; seg_clk_put(g_sclk); g_sclk = NULL;
     sub_cut_begin();
     defer_drain();
     rh_trim();
+    up_trim();
     defer_reset();
     mtl_prepare();   // done by then in the submit entry; the replay tool (nvn_replay) reaches it here
     warm_claim();
@@ -3024,6 +3026,7 @@ static unsigned g_up_seq;
 // Bursts beyond that budget and individual uploads larger than UP_BLOCK_SIZE still use temporary blocks, retired only after their GPU work. DM_NVN_UPLOAD_REUSE=0 keeps the original one-block policy.
 #define UP_SLOT_BLOCK (4u * 1024u * 1024u)
 static __strong id<MTLBuffer> g_up_slot_blk[3], g_up_slot_over[3]; static unsigned g_up_cur_slot;
+static uint64_t g_up_slot_used[3], g_up_trimmed, g_up_trimmed_bytes;   // when each slot's last batch began; staging given back by up_trim
 static size_t g_up_slot_want[3], g_up_batch_bytes; static int g_up_over_used;
 static int up_reuse(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_UPLOAD_REUSE"); on = !e || atoi(e); } return on; }
 static int up_retained(id<MTLBuffer> b, unsigned slot) { return b && (b == g_up_slot_blk[slot] || b == g_up_slot_over[slot]); }
@@ -3114,6 +3117,18 @@ static void up_flush(void) {
     [g_up_texs removeAllObjects];
 }
 
+// When a submission begins (the submit thread, which owns the upload batches): a slot whose last batch began more than 5 s ago and has completed gives its retained staging
+// back (up to 64 MB a slot, 192 MB across the three: six 32 MB private buffers stayed resident for good once a burst of texture streaming had made them). A later burst makes them again
+static void up_trim(void) {
+    if (!up_reuse() || g_up_cb) return;
+    uint64_t now = now_ns();
+    for (unsigned sl = 0; sl < 3; sl++) {
+        if (atomic_load(&g_up_alloc_busy[sl]) || !g_up_slot_used[sl] || now - g_up_slot_used[sl] < 5000000000ull || (!g_up_slot_blk[sl] && !g_up_slot_over[sl])) continue;
+        __strong id<MTLBuffer> *bs[2] = {&g_up_slot_blk[sl], &g_up_slot_over[sl]};
+        for (int k = 0; k < 2; k++) if (*bs[k]) { g_up_trimmed_bytes += (*bs[k]).length; res_remove(*bs[k]); *bs[k] = nil; }
+        g_up_slot_want[sl] = 0; g_up_trimmed++;
+    }
+}
 static void up_begin(void) {
     up_owner_check("up_begin");
     if (g_up_cb) return;
@@ -3123,7 +3138,7 @@ static void up_begin(void) {
     // block, and its RHI thread waited for good inside nvnQueueSubmitCommands (q_cb drains before it waits for the same reason)
     if (atomic_load(&g_up_alloc_busy[slot])) rec_publish();
     up_wait_zero(&g_up_alloc_busy[slot], WS_UPALLOC);
-    atomic_store(&g_up_alloc_busy[slot], 1); g_up_cur_slot = slot;
+    atomic_store(&g_up_alloc_busy[slot], 1); g_up_cur_slot = slot; g_up_slot_used[slot] = now_ns();
     g_up_batch_bytes = 0; g_up_over_used = 0;
     [g_up_alloc4[slot] reset];
     g_up_cb = [g_dev newCommandBuffer];
