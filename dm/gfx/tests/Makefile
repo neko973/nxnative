@@ -444,6 +444,14 @@ t_clear_tex: t_clear_tex.m $(MTL_T_DEP)
 .PHONY: check_t_clear_tex
 check_t_clear_tex: t_clear_tex
 	MTL_DEBUG_LAYER=1 ./t_clear_tex
+# The game-barrier rule and the counter of the draw-pass barriers: the default and each lever off (no GPU work)
+t_barrier_bits: t_barrier_bits.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_barrier_bits.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_barrier_bits
+check_t_barrier_bits: t_barrier_bits
+	@for gb in 1 0; do for why in 1 0; do \
+	    DM_NVN_BARRIER_GAME_BITS=$$gb DM_NVN_BARRIER_WHY=$$why ./t_barrier_bits || exit $$?; \
+	done; done
 t_attachment_capacity: t_attachment_capacity.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_attachment_capacity.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_attachment_capacity
