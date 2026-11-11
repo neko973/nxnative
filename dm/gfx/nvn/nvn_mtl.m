@@ -14403,8 +14403,11 @@ static void mtk_predict(NSString *tkey, NSString *mkey, NSString *fkey) {
     static int want = -1;
     if (want < 0) {
         const char *e = getenv("DM_NVN_MESH_PREDICT"); uint64_t mem = 0; size_t sz = sizeof mem; sysctlbyname("hw.memsize", &mem, &sz, NULL, 0);
-        want = e ? atoi(e) : mem > (16ull << 30) ? MTK_STATES : 0; if (want < 0) want = 0; if (want > MTK_STATES) want = MTK_STATES;
-        MLOG("native mesh pipelines: %s (%s)", want ? "built in the background when the game makes the program" : "built at their first draw only", e ? "DM_NVN_MESH_PREDICT" : "by memory size");
+        // Off unless the switch is set in this tree (PR #2307 had it on above 16 GiB): one run in about twenty with it on aborted at the Water Temple's entrance in Metal's validation of a
+        // predicted pipeline as the archive took it (arch_capture: "Mesh Render Pipeline Descriptor Validation: fragmentFunction main0 cannot be used to build a pipeline state. Use
+        // newFunctionWithName:constantValues:"). A state's key carries the border bit of the program it was met with, and this tree's pixel shaders declare the border function constant
+        (void)mem; want = e ? atoi(e) : 0; if (want < 0) want = 0; if (want > MTK_STATES) want = MTK_STATES;
+        MLOG("native mesh pipelines: %s (%s)", want ? "built in the background when the game makes the program" : "built at their first draw only", e ? "DM_NVN_MESH_PREDICT" : "off by default");
     }
     if (!want || !progpf_first([NSString stringWithFormat:@"M|%@|%@|%@", tkey ?: @"-", mkey, fkey ?: @"-"])) return;
     uint64_t frame = atomic_load(&g_cur_frame);
