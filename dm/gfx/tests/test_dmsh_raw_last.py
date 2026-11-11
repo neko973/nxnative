@@ -115,8 +115,8 @@ LDG128 = ((LDG[0] & ~(7 << 9)) | 6 << 9, (LDG[1] & ~(0xff << 16)) | 12 << 16)   
 def sts(rb, off): return (STORE[0], (STORE[1] & ~(0xffffffff << 32)) | rb << 32 | off << 40)   # STS.U32 [R9 * 16 + off], Rb
 VEC_HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, const device (_\d+)& \w+((?:, thread uint& _\d+)+), thread spvUnsafeArray<uint, 3>& (_\d+)\)\n\{\n')   # the kept entry's seven words, then gmem_vec
 # Through one pointer the loads are a run (GlobalToStorage.ResolveRawRuns, PR #1752): each calls a resolved helper (base, high, entry, address words) instead
-VEC_RESOLVED = re.compile(r'(?m)^int (_\d+)\((?:thread const int& _\d+, ){5}const device _\d+& \w+, (?:thread uint& _\d+, )?thread spvUnsafeArray<uint, 3>& (_\d+)(?:, thread uint& _\d+)?\)\n\{\n')
-RESOLVED = re.compile(r'(?m)^int (_\d+)\((?:thread const int& _\d+, ){5}const device _\d+& \w+, thread uint& _\d+\)\n\{\n')
+VEC_RESOLVED = re.compile(r'(?m)^int (_\d+)\((?:thread const int& _\d+, ){5}const device _\d+& \w+, (?:thread uint& _\d+, )*thread spvUnsafeArray<uint, 3>& (_\d+)(?:, thread uint& _\d+)*\)\n\{\n')
+RESOLVED = re.compile(r'(?m)^int (_\d+)\((?:thread const int& _\d+, ){5}const device _\d+& \w+(?:, thread uint& _\d+)+\)\n\{\n')
 
 
 @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
