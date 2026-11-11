@@ -2377,6 +2377,19 @@ static void fstep_tick(const win_t *o, int c) {
         slow_bits = (uint16_t)(slow_bits << 1 | (shown > k + FSTEP_LATE));
         if (__builtin_popcount(slow_bits) >= 12) g_fs.screen = 2;
     }
+    // Ticks mode, sticky holds (DM_FPS_STICKY=0 turns it off): a frame a little late is not evidence against the hold. On the 60 fps edge (Ocarina of Time's Kokiri village
+    // in fullscreen: frames of 16.8 ms, p95 18.6) three late frames in a row sent the hold to 40 fps for seconds, 11-29% of a walk, though the scene ran at 57 fps. The hold
+    // now moves up only when 16 of the last 24 frames were late by the tolerance, or 3 in a row by a whole tick; single late frames are shown a tick later and paid back
+    if (fs_t120() && !(mtl_snap_on() && mtl_link_active())) {
+        static int sticky = -1; if (sticky < 0) { const char *e = getenv("DM_FPS_STICKY"); sticky = !(e && !strcmp(e, "0")); }
+        if (sticky && g_fs.late_tol > 0) {
+            static uint32_t hist; static int hk, way_run; int k = g_fs.k ? g_fs.k : kmin;
+            if (k != hk) { hk = k; hist = 0; way_run = 0; }
+            hist = hist << 1 | (uint32_t)(shown > k + g_fs.late_tol || cost > k + g_fs.late_tol);
+            way_run = cost > k + 1.0 ? way_run + 1 : 0;
+            g_fs.screen = __builtin_popcount(hist & 0xffffff) >= 16 || way_run >= 3 ? 2 : 1;
+        }
+    }
     // A probe's grace lasts while its frames keep getting cheaper (nvn_fstep.h FSTEP_RAMP): macOS raises the GPU clock for the shorter deadline over seconds, not the iPhone's 30 frames
     // (Breath of the Wild on an M5 Pro: the probe's 33 frames took the clock 338 → 432 MHz and its GPU time 24.8 → 18.5 ms, then it failed at 22 ms frames; hold 1 needed about 560 MHz)
     g_fs.ramp = mtl_probe_ramp_on();
