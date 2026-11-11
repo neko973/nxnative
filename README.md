@@ -1,5 +1,19 @@
 # nxnative
 
+> **This branch (`ocarina-mac-60fps`): The Legend of Zelda: Ocarina of Time (Switch 2) at 60 fps on Apple silicon Macs.**
+> It is [seedds/nxnative](https://github.com/seedds/nxnative) plus frame-rate work for that one game. No game files are here: you build the app from your own dump.
+>
+> **Install in three steps** (Apple silicon Mac, macOS 26.6 or later, Xcode from the App Store opened once, [Homebrew](https://brew.sh), about 60 GB of free disk):
+>
+> ```
+> git clone -b ocarina-mac-60fps https://github.com/neko973/nxnative.git
+> cd nxnative
+> ./install-ocarina-mac.sh /path/to/your/OcarinaOfTime.nup
+> ```
+>
+> The script checks the Mac, installs what is missing (it asks first), builds the app (1 h 15 min to 1 h 45 min) and tells you where it put it. The tested settings are built in, so there is nothing to configure. `./install-ocarina-mac.sh --check` only checks the Mac. If it stops, it says why and what to do; details, results and troubleshooting: [docs/ocarina-of-time-mac-60fps.md](docs/ocarina-of-time-mac-60fps.md).
+
+
 Play your own Nintendo Switch and Switch 2 games natively on Apple silicon Macs, iPhone and iPad. One script packs your game into a Mac app or an unsigned IPA that you sideload.
 
 It is not an emulator: the game's own code runs directly on the Apple chip, with Switch graphics rebuilt on Metal. Nothing from any game is in this repository, and the project is not affiliated with Nintendo or any game publisher.

@@ -6,38 +6,38 @@ It contains no game files. You build the app from your own dump of the game, exa
 
 ## What you get
 
-Measured on a MacBook Pro with an M3 Pro (14-core GPU, 18 GB), fullscreen, full resolution, MetalFX upscale, the settings below:
+Measured on a MacBook Pro with an M3 Pro (14-core GPU, 18 GB), fullscreen with the screen on, the built-in settings, by the intervals between the frames the screen actually showed (`@presented_ms`). "Late" is the share of frames shown more than 17.5 ms after the one before, the ones Apple's performance HUD draws in red:
 
-| Area | Before this work (uncapped, window) | This branch (fullscreen, 60 fps setting) |
+| Area | Frame rate | Late frames |
 |---|---|---|
-| Kokiri village, 20 minutes of roaming around its middle | 37.5 fps, GPU 22.4 ms, 92 frames over 40 ms per 96 s walk | 59.9 fps, 99.6 % of the time at 60, frame p95 17.8 / p99 18.6 ms, GPU p50 15.0 ms, 21 of 70,713 frames over 40 ms (none over 100 ms) |
-| Kokiri village, the walk from Link's house (the heaviest view tested) | | 59.9 fps, 100 % of frames at 60, GPU p50 15.8 ms |
-| Hyrule Field | 42 fps, GPU 20.3 ms | 59.7 fps, 99 % of frames at 60 |
-| Link's house | not measured | 59.9 fps, 100 % |
-| Hyrule Castle courtyard | not measured | 59.9 fps, 99 % |
-| Kakariko | not measured | 59.7 fps, 99 % |
-| Zora's Domain | not measured | 60.0 fps, 100 % |
-| Water Temple | not measured | 60.0 fps, 99 % |
-| Inside Jabu-Jabu | not measured | 59.0 fps, 99 % |
-| Gerudo Valley | not measured | 59.1 fps, 99 % |
-| Zora's Fountain, facing the water | not measured | 58.6 fps, 100 % |
+| Kokiri village, 11 minutes of roaming around its middle | 60.0 fps | 0.1 % (longest interval 33 ms) |
+| Kokiri village, the walk from Link's house (the heaviest view tested) | 59.8-60.0 fps | 0.1-0.6 % |
+| Hyrule Field, walking | 60.0 fps | 0.1 % |
+| Hyrule Field, running, rolling, sword, camera sweeps | 60.0 fps | 0.2 % |
+| Kakariko | 60.0 fps | 0.0-0.1 % |
+| Hyrule Castle courtyard | 59.8-59.9 fps | 0.2-0.5 % |
+| Zora's Fountain, facing the water | 59.2 fps | 2.9 % (99th percentile 25 ms) |
 
-Each row but the first is a 48 s walk from a save's starting point. In a window the picture is composited by the window server, which costs about 1.4 ms of GPU a frame here: the village runs about 54 fps windowed. Play fullscreen.
+The rows are 48 s walks from a save's starting point unless they say otherwise. Before this work the village ran 37.5 fps (GPU 22.4 ms a frame) and the field 42 fps in a window. Zora's Domain, the Water Temple, Jabu-Jabu, Gerudo Valley and Link's house ran at 59.7-60.0 fps in the same sweep.
 
-The 20-minute run held the memory footprint flat (11.0-11.4 GB). Its long frames had no pipeline build or upload in them; macOS was indexing files on three cores during that run, and the same roam on the build before the last two shader changes, on a quiet machine, had 3. Slower GPUs than the one above will sit at 40 in the heavy areas; the frame step then keeps frames even (see below).
+In a window the picture is composited by the window server, which costs about 1.4 ms of GPU a frame here. Play fullscreen. The memory footprint stayed flat over the roam (11.1-11.3 GB). Slower GPUs than the one above will sit at 40 in the heavy areas; the frame step then keeps frames even (see below).
 
-The picture is the one the game draws docked with graphics scale tier 1: 3D passes at 1536x864, the picture at 2048x1152, as upstream drew it until `084f5aa5`. Upstream now answers tier 0 (1920x1080 and 2560x1440, about 56 % more pixels); here that is `DM_GFX_SCALE=0`, and this GPU does not hold 60 with it.
+An earlier version of this page gave sweep numbers that were taken while the display was asleep (the runs' logs show a 2560x1440 drawable and no fullscreen switch); they are replaced by the screen-on numbers above.
+
+The picture is the one the game draws docked with graphics scale tier 1: 3D passes at 1536x864, the picture at 2048x1152, as upstream drew it until `084f5aa5`. Upstream now answers tier 0 (1920x1080 and 2560x1440, about 56 % more pixels); here that is `DM_GFX_SCALE=0`. On this GPU the village then runs at an even 40 fps (52 fps unpaced) and the field at about 59.
 
 ## What changed
 
+The numbers in this list are the before / after comparisons that led to each change. Several were taken at night with the display asleep, so read them as differences, not as what the screen shows; the table above is the screen-on result.
+
 Host (Metal renderer and frame pacing), in the order of their effect:
 
-- **Light passes drawn as one** (`DM_NVN_DEFER_LOAD=1`). The game draws each shadow-casting light as a small depth-only shadow map and then one light volume (a box of 36 vertices) into a full-size mask that it loads: eleven one-draw passes a frame in Kokiri village, each loading colour and depth and storing colour for one box. The renderer's pass deferral took only passes that start with a clear; with the switch a loading pass is deferred past the depth-only passes to its next pass on the same targets, so the eleven boxes are one pass after the eleven shadow maps. It runs without the rest of TBDR mode (which costs this game about 1 ms a frame) and only in that narrow shape. In the village walk the on-screen frame interval was over 17.5 ms for 10 % of frames without it and 0-4 % with it (GPU p50 in the heaviest stretch 17.9 → 16.8-17.1 ms on an afternoon with other applications running); an 11-minute roam: 59.9 fps, on-screen interval p95 16.8 / p99 17.9 / max 33 ms. The picture was compared in seven areas inside one run each (`DM_NVN_DEFER_AB=1` turns the deferral on after the second screenshot).
+- **Light passes drawn as one** (`DM_NVN_DEFER_LOAD=1`). The game draws each shadow-casting light as a small depth-only shadow map and then one light volume (a box of 36 vertices) into a full-size mask that it loads: eleven one-draw passes a frame in Kokiri village, each loading colour and depth and storing colour for one box. The renderer's pass deferral took only passes that start with a clear; with the switch a loading pass is deferred past the depth-only passes to its next pass on the same targets, so the eleven boxes are one pass after the eleven shadow maps. It runs without the rest of TBDR mode (which costs this game about 1 ms a frame) and only in that narrow shape. With the screen on, interleaved runs: late frames in the village walk 1.6 % without it and 0.1-0.6 % with it, GPU p50 in Kakariko 13.4-13.5 → 12.3-12.5 ms, in the heaviest village stretch 17.9 → 16.8-17.1 ms; an 11-minute village roam with it: 60.0 fps, 0.1 % late, longest interval 33 ms. The picture was compared in seven areas inside one run each (`DM_NVN_DEFER_AB=1` turns the deferral on after the second screenshot).
 - **Event gate** (`DM_NVN_EVENT_GATE=1`). Each frame the game queues its second large command list behind a wait for an event that its CPU signals once the first list's fence has passed. The host used to translate that list only when the wait was satisfied, and the GPU sat idle about 2.6 ms of every frame meanwhile. The wait is now put on the Metal queue itself (`waitForEvent`), and the commands behind it are translated and committed ahead of time; a watcher thread opens the gate within 50 µs of the game's signal. Only events that no command list ever signals, and whose waits were seen to block and pass 30 times within 40 ms, are gated; a gate that is not opened within 100 ms is forced open, that event is never gated again, and three forced gates turn the feature off for the run.
 - **Pool-table buffers are reused** (96 spares instead of 16). The game patches 10-15 pool tables a frame; with 16 spares about four new 312 KB buffers were made every frame, each a residency-set add and remove. This removed most of the frames whose GPU time doubled (75 → 13 per walk).
 - **MetalFX takes the upscale of `agl_ndsr_vr` again** (`DM_UPSCALER=metalfx`). Without it the game's own temporal upscaler ran every frame (about 1.6 ms of GPU) and ghosted the player character while turning.
 - **The 60 fps hold stays put** (ticks mode). Three things kept a scene that runs at 57 fps at 40 instead: three slightly late frames in a row moved the hold up; at the 40 fps hold the GPU idles a third of each frame, macOS lowers its clock (1380 → about 1200 MHz) and the same frames then take 21.8 ms instead of 15.5; and the way back asked for a cost under 14.2 ms. Now the hold moves up only when 16 of the last 24 frames were late (`DM_FPS_STICKY`), a frame fits the shorter hold within 1.7 ms of it, and the GPU clock keeper has a mode that runs only while the game is held below its target (`DM_GPU_KEEP=hold`). Kokiri village in fullscreen: 44 → 56-58 fps.
-- **Presentation without the display link** (`DM_PRESENT_LINK=0`). The present thread takes the screen's textures itself instead of waiting for a 120 Hz display link callback, and the frame step paces by the time of the texture's slot. Measured against the link in the fullscreen village, two walks each: 58.3 / 58.5 against 57.9 / 58.3 fps, and frames over 40 ms 3 / 1 against 23 / 18 (longest frame 30 ms against 140 ms); in the 20-minute run, frames over 40 ms fell from 163 to 3.
+- **Presentation without the display link** (`DM_PRESENT_LINK=0`). The present thread takes the screen's textures itself instead of waiting for a 120 Hz display link callback, and the frame step paces by the time of the texture's slot. With the screen on, late frames with it and with the 120 Hz link: castle 0.2-0.5 % against 1.0-1.8 %, Kakariko 0.1 % against 8.1 %, the village walk 0.5 % against 5.0 %.
 - **Frame step in ticks of 1/120 s for 60 fps** (`DM_FPS_TARGET=60` with `DM_FPS_TICKS=1`): on a 120 Hz screen a scene that cannot hold 60 runs at an even 40 before it falls to 30, and the game steps by the ticks, so its speed is right at every rate. Late-frame tolerance of 3.3 ms at every hold (`DM_FPS_LATE_TICKS`), and failed attempts at a shorter hold back off to once a minute, so a scene that holds 40 is not probed back to 60 every few seconds.
 - `DM_FPS_TARGET=40` (hold 3 ticks), inherited from the base of this branch.
 - A frame timeline trace (`DM_NVN_SEQ=<frame>`): the game's submits, fences and waits, the host's commits and every command buffer's GPU start and end for four frames. This is what found the idle GPU time.
@@ -52,21 +52,41 @@ Also taken from upstream after the base: `1d090a66` (uniform slots bounded at 25
 
 Tried and not kept as defaults, because they gave nothing on this machine: `DM_NVN_TBDR=1` (pass merging), the compute hoist (`DM_NVN_CS_HOIST`, set to 0 below), smaller or no segment cuts without the gate, and the GPU clock keeper at full or automatic duty (its own work costs up to 1 ms a frame while the game is at its shortest hold; `hold` mode avoids that).
 
-## Build it with your own copy of the game
+## Install it with your own copy of the game
 
-You need what upstream needs: an Apple silicon Mac with macOS 26.6 or later, Xcode 27.2, Homebrew, Python 3.12 or newer, and your own dump of the game as a `.nup` file or a folder (see the main [README](../README.md#switch-2-games)). The build takes about 1 h 15 min to 1 h 45 min on an M3 Pro (50-65 minutes of shader compiling, 12-27 of pipeline prebuild) and about 50 GB of free disk while it runs.
+You need an Apple silicon Mac with macOS 26.6 or later, Xcode from the App Store (opened once), [Homebrew](https://brew.sh), about 60 GB of free disk while it builds, and your own dump of the game as a `.nup` file or a folder (see the main [README](../README.md#switch-2-games)). Then:
 
 ```
 git clone -b ocarina-mac-60fps https://github.com/neko973/nxnative.git
 cd nxnative
-python3 scripts/build_ipa_from_nsp.py ~/Games/OcarinaOfTime.nup --platform mac-app
+./install-ocarina-mac.sh /path/to/your/OcarinaOfTime.nup
 ```
 
-The script prints where it put the app. If it stops and names a flag (`--allow-other-metal` for another Metal toolchain version, `--allow-damaged` for a dump with damaged files), read its message and decide; this branch was built with both.
+The script checks the Mac, installs what is missing after asking (the Homebrew packages `zstd` and `glslang`, a Python 3.12 or later if there is none, the Metal compiler; the Python modules `lz4`, `capstone` 5, `fonttools` and `zbic` go into a folder of their own, `.oot-venv`), builds the app and prints where it put it: next to your dump, named after the game. The build takes 1 h 15 min to 1 h 45 min on an M3 Pro (50-65 minutes of shader compiling, 12-27 of pipeline prebuild). The settings below are built into the app (`dm/games/0400486024DEC000/mac-60fps.env`), so there is nothing to set up. `./install-ocarina-mac.sh --check` only checks the Mac and builds nothing.
+
+The first start of the app prepares pipelines for several minutes behind a progress screen; later starts take seconds.
+
+### If it stops
+
+The script says what is missing and the command that fixes it. The cases seen so far:
+
+| Message | What to do |
+|---|---|
+| `the Command Line Tools are selected` or `Xcode is not installed` | Install Xcode from the App Store, open it once, then `sudo xcode-select -s /Applications/Xcode.app` |
+| `The Metal compiler ... is not installed` | Answer `y`, or run `xcodebuild -downloadComponent MetalToolchain` |
+| `Homebrew is not installed` | Install it from https://brew.sh, open a new Terminal window, run the script again |
+| `the current Python ... is missing modules` | You ran `scripts/build_ipa_from_nsp.py` yourself with a Python that lacks them. Use `./install-ocarina-mac.sh`, which brings its own |
+| `Capstone 6 ... is unsupported` | The same: the script's own Python folder has Capstone 5 |
+| files `whose bytes do not start as their names promise` | Your dump has damaged files. Dump again, or add `--allow-damaged` to pack them as they are (three damaged textures did no visible harm here) |
+| `built only with the Metal compiler they were tested with` | The script already passes `--allow-other-metal`; you see this only when you call the packing script yourself with another Xcode |
+| the disk fills up | Free space and run the same command again: finished steps are reused |
+| `this Python ... is an Intel one running under Rosetta` | Turn off "Open using Rosetta" for the Terminal app, or use `/opt/homebrew/bin/python3` |
+
+To build by hand instead, what the script runs is `python3 scripts/build_ipa_from_nsp.py <dump> --platform mac-app --env-file dm/games/0400486024DEC000/mac-60fps.env --allow-other-metal --allow-shader-regressions` with a Python 3.12 or later that has the modules above.
 
 ## Settings
 
-The frame rate is chosen in the app's settings window (30, 40 or 60). The rest goes into the app's settings file, `~/Library/Application Support/nxnative/0400486024DEC000/env.txt`, one `KEY=VALUE` per line (create the folder and file if they are not there; delete a line to get its default back):
+The frame rate is chosen in the app's settings window (30, 40 or 60). An app built with `install-ocarina-mac.sh` has the rest built in. To change one for yourself, or for an app built without the script, put it in `~/Library/Application Support/nxnative/0400486024DEC000/env.txt`, one `KEY=VALUE` per line (create the folder and file if they are not there; a line there wins over the built-in one):
 
 ```
 DM_OPMODE=1
@@ -99,13 +119,13 @@ The log is `~/Library/Logs/nxnative/0400486024DEC000.log`. After a minute of pla
 - `upscaler: first dispatch of fa3033d05c0a41d6_b drawn by MetalFX`.
 - `frame step: game time X s in Y s (1.000 of real time); held 2 / 3 / 4 ticks a / b / c frames`: the share of frames at 60, 40 and 30 fps, and the game's speed.
 
-When judging smoothness from a `DM_NVN_TSV` table, read `@display_ms` (the on-screen interval, what the HUD's line shows), not `@frame_ms` (the game-side interval, which alternates when the game runs ahead of the screen).
+When judging smoothness from a `DM_NVN_TSV` table, read `@presented_ms` (the interval between the frames the screen showed, what the HUD's line shows; -1 is a frame that was never shown). `@display_ms` is the pacer's planned slot interval and `@frame_ms` the game-side interval; both alternate by a millisecond or more when the game runs ahead of the screen, which the screen does not show. Make sure the display is on: a run with the display asleep never goes fullscreen (its log has no `front end: drawable` line at the screen's size).
 
 Useful numbers to report with a result: the Mac and its GPU core count, fullscreen or window, the area, and a few of the `timing up to frame` lines (frame time and GPU p50 / p95).
 
 ## Known limits
 
-- The heaviest views are on the edge on this GPU: the view from Link's house over the whole village and Zora's Fountain facing the water run 15.7-16.1 ms of GPU work a frame in fullscreen, so there is under 1 ms to spare there and a few percent of their frames show one refresh late. Smaller GPUs will not hold 60 in the village; the frame step then settles at an even 40.
+- The heaviest views are on the edge on this GPU: the view from Link's house over the whole village runs 15.3-15.9 ms of GPU work a frame and Zora's Fountain facing the water 16.0 ms, so there is under 1 ms to spare there; the fountain shows about 3 % of its frames one refresh late. Smaller GPUs will not hold 60 in the village; the frame step then settles at an even 40.
 - A pipeline that no list names is compiled at its first draw and kept; such a first draw can stall for 0.1-0.7 s once. The lists here cover ten areas. For the rest, the open upstream pull request #2307 (AmateurWizrd) is in the tree but off: `DM_NVN_MESH_PREDICT=16` builds task / mesh pipelines in the background when the game makes their program. In a room no list or archive had seen (the Water Temple's Dark Link room) it took frames over 40 ms from 10 to 1, but one run in about twenty with it on aborted at the Water Temple's entrance (Metal refused a predicted pipeline as the archive captured it), so it stays off until that is fixed.
 - Anything else that uses the GPU or the video encoder while you play (screen recording, screen sharing, AirPlay) costs frames: with the screen being streamed, identical runs here varied between 41 and 56 fps.
 - The event gate changes when part of each frame is translated. It was run through nine areas and a 4,800-frame video check per configuration without a picture fault, a forced gate or a crash, but it is new: `DM_NVN_EVENT_GATE=0` (or deleting the line) restores the old behaviour.

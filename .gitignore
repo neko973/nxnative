@@ -11,3 +11,7 @@ dm/games/*/cb_extent.tsv
 .coverage
 .coverage.*
 /coverage.json
+
+# install-ocarina-mac.sh
+.oot-venv/
+install-ocarina-mac.log
