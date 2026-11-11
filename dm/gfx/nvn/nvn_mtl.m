@@ -15588,6 +15588,7 @@ enum { KEEP_SPIN = 140000 };
 // (58 fps after 10 minutes, against 60 for 10 minutes with the keeper off); at 30 fps the frames take 20 ms and more, and the keeper lifts them back. DM_GPU_KEEP_MS=<hi>,<lo> overrides
 static double KEEP_HI_MS = 14.0, KEEP_LO_MS = 11.5;
 static _Atomic int g_keep_active;
+__attribute__((weak)) int nvn_fstep_above_min(void) { return 0; }   // hle_nvn.c: the frame step holds frames longer than its cap's shortest hold
 static void *gpu_keep_main(void *arg) {
     int mode = (int)(intptr_t)arg; pthread_setname_np("dm-gpu-keep");
     { const char *e = getenv("DM_GPU_KEEP_MS"); double hi, lo; if (e && sscanf(e, "%lf,%lf", &hi, &lo) == 2 && hi > lo && lo >= 0) { KEEP_HI_MS = hi; KEEP_LO_MS = lo; } }
@@ -15601,6 +15602,10 @@ static void *gpu_keep_main(void *arg) {
         uint64_t now = now_ns(), pn = g_present_n;
         if (pn != last_present) { last_present = pn; last_change = now; }
         int presenting = now - last_change < 250000000ull;
+        // mode 3 (DM_GPU_KEEP=hold): full duty only while the frame step holds frames longer than its shortest hold. At 60 fps in ticks Ocarina of Time's village dropped to the
+        // 40 fps hold on a few late frames; the GPU then idled a third of each frame, macOS lowered its clock (1380 -> ~1200 MHz), the same frames read 21.8 ms instead of 15.5
+        // and the hold never came back. At the shortest hold the GPU is busy anyway and the keeper's own work only costs frame time, so it stops there
+        if (mode == 3) duty = nvn_fstep_above_min() ? 1 : 0;
         if (mode == 2 && now - last_adj > 500000000ull) {   // the frames' GPU time over the last half second, 8 frames back as the timing line takes it
             last_adj = now; uint64_t f = atomic_load(&g_cur_frame); double sum = 0; int k = 0;
             for (uint64_t d = 8; d < 38 && f > d; d++) { double g = mtl_gpu_ms(f - d); if (g >= 0) { sum += g; k++; } }
@@ -15619,11 +15624,11 @@ static void *gpu_keep_main(void *arg) {
 }
 static void gpu_keep_start(void) {
 #if TARGET_OS_OSX
-    const char *e = getenv("DM_GPU_KEEP"); int mode = e ? atoi(e) : 2; if (e && !strcmp(e, "auto")) mode = 2;
+    const char *e = getenv("DM_GPU_KEEP"); int mode = e ? atoi(e) : 2; if (e && !strcmp(e, "auto")) mode = 2; if (e && !strcmp(e, "hold")) mode = 3;
     if (mode <= 0) { MLOG("GPU clock keeper: off (DM_GPU_KEEP=0)"); return; }
     pthread_t th; if (pthread_create(&th, NULL, gpu_keep_main, (void *)(intptr_t)mode)) { MLOG("[RED] GPU clock keeper: cannot start its thread"); return; }
     pthread_detach(th);
-    MLOG("GPU clock keeper: %s (DM_GPU_KEEP)", mode == 1 ? "full duty" : "duty set by the frames' GPU time");
+    MLOG("GPU clock keeper: %s (DM_GPU_KEEP)", mode == 1 ? "full duty" : mode == 3 ? "on while the frame step holds frames longer than its shortest hold" : "duty set by the frames' GPU time");
 #endif
 }
 void mtl_res_snapshot(mtl_res_count *out) {

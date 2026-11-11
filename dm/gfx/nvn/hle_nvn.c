@@ -2349,6 +2349,8 @@ static int fstep_hold(void) {
 }
 // Once per present, before this frame's period is taken: the time since the previous frame's start (shown) and the frame's cost decide this frame's hold and the next frame's step.
 // Cost = max(CPU: the time between the frames' starts without the pacing wait, GPU: the latest finished frame's GPU time), in vsyncs
+static _Atomic int g_fs_above;
+int nvn_fstep_above_min(void) { return atomic_load(&g_fs_above); }
 static void fstep_tick(const win_t *o, int c) {
     static uint64_t prev, t0, fixed_sum, held[FSTEP_KMAX + 1]; static double v0; static int nlog;
     const double v = 1e9 / fstep_hz();
@@ -2401,11 +2403,13 @@ static void fstep_tick(const win_t *o, int c) {
     // and at 1.7 ms the hold left 60 fps for 40 on three frames of 18.4 ms and came back only by a probe; DM_FPS_LATE_TICKS=<ticks> overrides both
     { static double lt = -1; if (lt < 0) { const char *e = getenv("DM_FPS_LATE_TICKS"); lt = e ? atof(e) : 0.4; if (!(lt > 0 && lt < 1)) lt = 0.4; }
       g_fs.late_tol = fs_t120() ? lt : 0; g_fs.up_tol = fs_t120() ? lt : 0; }
+    g_fs.fit_slack = fs_t120() ? g_fs.late_tol / 2 : 0;   // ticks mode: back to the shorter hold when the cost is within 1.7 ms of it (18.3 ms for 60 fps)
     g_fs.hold_cap = fs_t120() && g_fs.k <= 3 ? 3600 : 0;   // ticks mode: after failed trials for 60 fps the next one waits up to 60 s (1, 4, 16, 60 s), not 8; from 30 fps the 8 s stay
     g_fs.kcap = fs_t120() ? 6 : 0;   // 40 fps: steps up to 6 ticks (3 vsyncs, as in whole vsyncs), so hold 4 can still pay back
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + (fs_t120() ? 0x2c : 0x20)), (uint32_t)n, __ATOMIC_RELAXED);   // 40 fps: the step in ticks of 1/120 s (the stub reads +0x2c first)
     atomic_store(&g_fs_k, g_fs.k);
+    atomic_store(&g_fs_above, fstep_on() && g_fs.k > kmin);   // held longer than the cap's shortest hold: the GPU idles part of each frame (the clock keeper's cue)
     held[g_fs.k]++; if (fixed) fixed_sum += (uint64_t)n;   // the stubs count only the host's steps
     static int fixed_was, nfix;
     if (fixed != fixed_was && nfix < 40) { nfix++; if (fixed) LOG("[nvn] frame step: the game fixes its own step at %d vsyncs at present %llu", fixed, (unsigned long long)o->presents); else LOG("[nvn] frame step: the game hands the step back to the host at present %llu", (unsigned long long)o->presents); }

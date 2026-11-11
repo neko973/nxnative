@@ -49,6 +49,8 @@ typedef struct {
     double pa, pb; int plate, ptotal;   // the current grace window: the cost of its first and second halves (sums), its late frames; grace frames this probe has taken in all
     double hold, since;       // vsyncs a trial waits for after a step up; vsyncs since the last step up
     int kcap;                 // set by the caller: the largest step (FSTEP_MAX when 0); 40 fps in ticks of 1/120 s (hle_nvn.c fs_t120) takes 6
+    double fit_slack;         // set by the caller: a frame would fit k - 1 when its cost is at most (k - 1) + this, in the caller's unit (0 = FSTEP_FIT times k - 1). With the
+                              // late tolerance of ticks mode a hold keeps frames up to 3.3 ms over it, so a cost of 15.5-17 ms at the 40 fps hold belongs at 60 (FSTEP_FIT asks 14.2 ms)
     double hold_cap;          // set by the caller: the longest wait between trials after failed ones, in vsyncs (0 = FSTEP_HOLD_MAX, 8 s), reached by quadrupling instead of doubling.
                               // Ocarina of Time's village at 40 fps (GPU 18 ms) was probed back to 60 every 8 s for good, each probe 33 frames of uneven intervals (the Metal
                               // HUD's frame interval graph mostly red); with 60 s a scene that cannot hold the shorter hold is asked once a minute
@@ -138,7 +140,7 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
         if (held == kmin && s->run >= hold_max) s->cref = s->crun;   // kmin held 8 s at this cost
         s->k = want; s->ups++; s->late_run = s->fit_run = 0; s->since = 0; s->probe = 0;
     } else if (s->trial && !grace && !--s->trial) { if (s->probe) { s->probe = 2; s->since = 0; } else s->hold = hold0; }   // the trial held (a probe's run at kmin is judged at the next step up)
-    if (!late) s->fit_run = s->k > kmin && cost <= FSTEP_FIT * (s->k - 1) ? s->fit_run + 1 : 0;
+    if (!late) s->fit_run = s->k > kmin && cost <= (s->fit_slack > 0 ? (s->k - 1) + s->fit_slack : FSTEP_FIT * (s->k - 1)) ? s->fit_run + 1 : 0;
     if (s->fit_run >= FSTEP_RUN && s->since >= s->hold && !s->trial) { s->k--; s->downs++; s->trial = FSTEP_RUN; s->fit_run = 0; }
     else if ((slow || nvn_fstep_same(s)) && s->k > kmin && s->since >= s->hold && !s->trial) {   // probe: straight to kmin, so the controller sees the whole deadline
         s->k = kmin; s->downs++; s->probes++; s->trial = FSTEP_RUN; s->probe = 1; s->grace = FSTEP_GRACE; s->fit_run = s->late_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;

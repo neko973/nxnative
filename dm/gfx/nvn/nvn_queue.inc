@@ -81,11 +81,13 @@ void nvn_queue_gpu_progress(void) {
     while(*p) { nq_event_write *w=*p; if(w->fence<=done) { *p=w->next; free(w); } else p=&w->next; }
     pthread_cond_broadcast(&nq_cv); pthread_mutex_unlock(&nq_mu);
 }
+static void nq_gate_signal(volatile uint32_t *word);   // the event gate: the game's own signal opens the Metal queue's wait at once (the watcher's poll is the fallback for plain stores)
 static void nq_event_publish(volatile uint32_t *word,unsigned mode,uint32_t value,uint64_t gpu_fence) {
     pthread_mutex_lock(&nq_mu);
     if(mode==1) atomic_fetch_add_explicit((_Atomic uint32_t *)word,value,memory_order_release);
     else atomic_store_explicit((_Atomic uint32_t *)word,value,memory_order_release);
     atomic_thread_fence(memory_order_seq_cst);
+    nq_gate_signal(word);
     // Latch waits already reached: a subsequent signal must not erase a release.
     for(nq_queue *q=nq_queues;q;q=q->next) if(q->first && q->first->first) {
         nq_node *n=q->first->first;
@@ -123,6 +125,9 @@ static int nq_gate_word(volatile uint32_t *w,int make) { int fr=-1; for(int i=0;
 static void nq_gate_listed(volatile uint32_t *w) { int i=nq_gate_word(w,1); if(i>=0) nq_gate_words[i].bad=1; }
 static void nq_gate_learn(volatile uint32_t *w,uint64_t waited_ns) { int i=nq_gate_word(w,1); if(i<0) return; if(waited_ns<=NQ_GATE_FAST_NS) nq_gate_words[i].fast++; else nq_gate_words[i].fast=0; }
 static pthread_cond_t nq_gate_cv=PTHREAD_COND_INITIALIZER; static int nq_gate_state=-1; static uint64_t nq_gate_n, nq_gate_forced, nq_gate_ns;
+static void nq_gate_signal(volatile uint32_t *word) {   // nq_mu held
+    if(nq_gate.active && nq_gate.word==word && nq_predicate(atomic_load_explicit((_Atomic uint32_t *)word,memory_order_acquire),nq_gate.mode,nq_gate.value)) { mtl_gate_open(nq_gate.v); dm_seq("gate-open-direct",nq_gate.v,(now_ns()-nq_gate.t0)/1000); }
+}
 static void *nq_gate_watch(void *unused) {
     (void)unused; pthread_setname_np("NVN event gate");
     for(;;) {
