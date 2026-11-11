@@ -116,7 +116,7 @@ static void nq_cost_end(nq_cost c) {
 // The event gate (nvn_mtl.m mtl_gate_close): one at a time. The watcher opens the Metal queue's wait when the game's event word satisfies the wait, within 50 us; an event that
 // does not come within 100 ms opens it anyway and turns gating off for the run (a signal that depended on work behind the gate: the wait blocks the replay again, as before)
 uint64_t mtl_gate_close(void); void mtl_gate_open(uint64_t v);
-static struct { int active; volatile uint32_t *word; unsigned mode; uint32_t value; uint64_t v, t0; } nq_gate;
+static struct { int active; volatile uint32_t *word; unsigned mode; uint32_t value; uint64_t v, t0, fence; } nq_gate;   // fence: the last submission committed before the gate (DM_NVN_EVENT_GATE=2)
 // An event is gated only once its waits have blocked and passed NQ_GATE_LEARN times, each within NQ_GATE_FAST_NS: the per-frame handshake of a running game, not a wait of its
 // start or of a loading screen (Ocarina of Time's first such wait took over 100 ms). An event whose gate had to be forced open is never gated again
 enum { NQ_GATE_WORDS=64, NQ_GATE_LEARN=30 }; static const uint64_t NQ_GATE_FAST_NS=40000000ull;
@@ -134,7 +134,11 @@ static void *nq_gate_watch(void *unused) {
         pthread_mutex_lock(&nq_mu); while(!nq_gate.active) pthread_cond_wait(&nq_gate_cv,&nq_mu);
         volatile uint32_t *w=nq_gate.word; unsigned mode=nq_gate.mode; uint32_t value=nq_gate.value; uint64_t v=nq_gate.v, t0=nq_gate.t0; pthread_mutex_unlock(&nq_mu);
         int forced=0;
-        for(;;) { if(nq_predicate(atomic_load_explicit((_Atomic uint32_t *)w,memory_order_acquire),mode,value)) break; if(now_ns()-t0>100000000ull) { forced=1; break; } usleep(50); }
+        // DM_NVN_EVENT_GATE=2 (experiment): the gate also opens once everything committed before it has left the GPU, without waiting for the game's signal, which follows
+        // that by 0.2-0.3 ms in Ocarina of Time (its thread wakes from its SyncWait on that fence, then signals): the GPU idled that long at the gate every frame
+        uint64_t gf=nq_gate.fence; int early=0;
+        for(;;) { if(nq_predicate(atomic_load_explicit((_Atomic uint32_t *)w,memory_order_acquire),mode,value)) break; if(nq_gate_state==2 && gf && mtl_completed_fence()>=gf) { early=1; break; } if(now_ns()-t0>100000000ull) { forced=1; break; } usleep(nq_gate_state==2 ? 20 : 50); }
+        if(early) { mtl_gate_open(v); dm_seq("gate-open-early",v,(now_ns()-t0)/1000); uint64_t te=now_ns(); while(!nq_predicate(atomic_load_explicit((_Atomic uint32_t *)w,memory_order_acquire),mode,value)) { if(now_ns()-te>100000000ull) { forced=1; break; } usleep(50); } }
         mtl_gate_open(v); dm_seq(forced?"gate-forced":"gate-open",v,(now_ns()-t0)/1000);
         pthread_mutex_lock(&nq_mu); nq_gate.active=0; nq_gate_ns+=now_ns()-t0; if(forced) { nq_gate_forced++; int wi=nq_gate_word(w,1); if(wi>=0) nq_gate_words[wi].bad=1; if(nq_gate_forced>=3) nq_gate_state=0; }
         uint64_t gn=nq_gate_n, gns=nq_gate_ns; pthread_cond_broadcast(&nq_cv); pthread_mutex_unlock(&nq_mu);
@@ -144,14 +148,14 @@ static void *nq_gate_watch(void *unused) {
     return NULL;
 }
 static int nq_gate_try(nq_job *j,nq_node *n,uint64_t predecessor) {   // nq_mu held; n is a wait for an event that is not there yet
-    if(nq_gate_state<0) { const char *e=getenv("DM_NVN_EVENT_GATE"); nq_gate_state=e && atoi(e)>0;
+    if(nq_gate_state<0) { const char *e=getenv("DM_NVN_EVENT_GATE"); nq_gate_state=e && atoi(e)>0 ? (atoi(e)>=2 ? 2 : 1) : 0;
         if(nq_gate_state) { pthread_t t; if(pthread_create(&t,NULL,nq_gate_watch,NULL)) nq_gate_state=0; else { pthread_detach(t); LOG("[nvn] event gate on (DM_NVN_EVENT_GATE): a wait for an event the game signals from the CPU goes on the Metal queue, and the commands after it are replayed ahead"); } } }
     if(nq_gate_state<=0 || nq_gate.active || predecessor>mtl_completed_fence()) return 0;
     { int wi=nq_gate_word(n->event,0); if(wi<0 || nq_gate_words[wi].bad || nq_gate_words[wi].fast<NQ_GATE_LEARN) return 0; }
     nq_node *nx=n->next ? n->next : j->next ? j->next->first : NULL;
     if(!nx || nx->kind!=NQ_COMMANDS) return 0;   // nothing to replay ahead yet
     uint64_t v=mtl_gate_close(); if(!v) return 0;
-    nq_gate.word=(volatile uint32_t *)n->event; nq_gate.mode=n->mode; nq_gate.value=n->value; nq_gate.v=v; nq_gate.t0=now_ns(); nq_gate.active=1; nq_gate_n++;
+    nq_gate.word=(volatile uint32_t *)n->event; nq_gate.mode=n->mode; nq_gate.value=n->value; nq_gate.v=v; nq_gate.t0=now_ns(); nq_gate.fence=mtl_last_fence(); nq_gate.active=1; nq_gate_n++;
     pthread_cond_signal(&nq_gate_cv); dm_seq("gate-close",v,0);
     return 1;
 }
