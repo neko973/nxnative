@@ -6769,6 +6769,19 @@ static void pool_seen_clear(int id_) {
     g_seen_done[(unsigned)id_ >> 5] &= ~b;
     if (g_seen_buf) atomic_fetch_and((_Atomic uint32_t *)g_seen_buf.contents + ((unsigned)id_ >> 5), ~b);
 }
+// How recent a read mark is. A mark kept for good through every new texture (mtl_reg_tex) covered, an hour into Ocarina of Time, 19,201 of its 33,024 IDs (22.7 GB of textures):
+// the IDs every area it had passed through read once. Each area load streams thousands of new textures into those IDs, and a marked ID's texture is made under the read budget
+// whatever the walk's room (pool_entry), so the loads into Hyrule Field made 100-300 textures a frame for seconds, at 200-670 ms a frame, with 9.8 GB allocated against 3.9 GB in
+// the session's first minutes. So the host takes the GPU's marks back every SEEN_REARM frames (the shaders set them again at their next read, dm_pool_mark), notes the frame each
+// mark was last found in (up to SEEN_REARM frames after the read), and a new texture keeps the ID's mark only when a shader read the ID within the last DM_NVN_SEEN_KEEP frames (600 by default): the streamed replacement of
+// a material on screen (PR #2022) keeps it, a texture streamed into an ID left behind areas ago holds its stand-in until it is read. DM_NVN_SEEN_KEEP=0: marks stay for good, as before
+enum { SEEN_REARM = 60 };
+static uint32_t g_seen_at[POOL_SEEN_WORDS * 32]; static uint64_t g_seen_rearm, g_seen_kept, g_seen_dropped;
+static int seen_keep(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_SEEN_KEEP"); v = e ? MAX(atoi(e), 0) : 600; } return v; }
+static int pool_seen_stale(int id_) {   // caller holds g_rmu
+    if (!seen_keep() || id_ < 0 || id_ >= (int)(POOL_SEEN_WORDS * 32) || !pool_seen(id_)) return 0;
+    return (uint32_t)atomic_load(&g_cur_frame) - g_seen_at[id_] > (uint32_t)seen_keep();
+}
 void mtl_reg_tex_gone(int tid) {
     os_unfair_lock_lock(&g_rmu);
     if (tid >= 0 && tid < g_ntreg && g_treg[tid].ok) treg_gone(&g_treg[tid]);
@@ -6789,7 +6802,10 @@ void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
         // Ocarina of Time allocates 15-18 GB against a 909 MB budget on a 24 GB Mac, and when its streaming replaced the 17 textures of the castle town wall's material set (3-7 MB each,
         // each step registered twice, 4-5 frames apart), each registration's first read found the dummy, and the wall, the rocks and the trees drew black for one frame, twice (PR #2022).
         // A render target no pass has written stays the dummy all the same (pool_unwritten_target). A texture streamed into an ID no shader has read yet holds its stand-in until its first read (pool_stand, issue #1969)
-        reg_bump(id_, 0); if (!t) pool_seen_clear(id_);
+        reg_bump(id_, 0);
+        if (!t) pool_seen_clear(id_);
+        else if (pool_seen_stale(id_)) { pool_seen_clear(id_); g_seen_dropped++; }
+        else if (pool_seen(id_)) g_seen_kept++;
         treg_unlink(id_); treg_drop_views(rr); treg_drop_stand(rr);
         rr->tt1 = 0; rr->reg_frame = atomic_load(&g_cur_frame);
         rr->ok = t != NULL; if (t) rr->t = *t; rr->has_v = v != NULL; if (v) rr->v = *v;
@@ -10332,15 +10348,24 @@ static void pool_seen_scan(void) {
     g_seen_sub = g_sub_serial;
     uint64_t f = atomic_load(&g_cur_frame); if (f != g_walk_frame) { g_walk_frame = f; g_walk_spent = 0; g_walk_req = 0; }
     if (g_stand_todo_n) pool_stand_scan();
-    { static uint64_t at, was; uint64_t now = g_stand_made + g_first_stand + g_first_dummy;   // the totals, every 300 frames in which they changed
+    { static uint64_t at, was; uint64_t now = g_stand_made + g_first_stand + g_first_dummy + g_seen_kept + g_seen_dropped;   // the totals, every 300 frames in which they changed
       if (f >= at + 300 && now != was) { at = f; was = now;
-          MLOG("pool stand-ins up to frame %llu: %llu made in %.1f ms (%llu of them a level cut down), %llu gave way to their texture, %llu held now in %d heaps of %u MB (%llu not made: the heaps were full), %u waiting; first reads of a texture not made found a stand-in %llu times%s and the dummy %llu times (%llu of them textures of 256 KB or more)",
+          MLOG("pool stand-ins up to frame %llu: %llu made in %.1f ms (%llu of them a level cut down), %llu gave way to their texture, %llu held now in %d heaps of %u MB (%llu not made: the heaps were full), %u waiting; first reads of a texture not made found a stand-in %llu times%s and the dummy %llu times (%llu of them textures of 256 KB or more); a new texture kept its ID's read mark %llu times, dropped it %llu times (not read for %d frames)",
                (unsigned long long)f, (unsigned long long)g_stand_made, g_stand_ns / 1e6, (unsigned long long)g_stand_picked, (unsigned long long)g_stand_done, (unsigned long long)g_stand_live, g_nstand_heap, (unsigned)(STAND_HEAP >> 20), (unsigned long long)g_stand_full, g_stand_todo_n, (unsigned long long)g_first_stand,
-               g_first_stale ? [NSString stringWithFormat:@" (%llu written since the stand-in was made)", (unsigned long long)g_first_stale].UTF8String : "", (unsigned long long)g_first_dummy, (unsigned long long)g_first_dummy_big); } }
-    const uint32_t *w = (const uint32_t *)g_seen_buf.contents; unsigned words = MIN((unsigned)g_ntreg / 32 + 1, (unsigned)POOL_SEEN_WORDS);
+               g_first_stale ? [NSString stringWithFormat:@" (%llu written since the stand-in was made)", (unsigned long long)g_first_stale].UTF8String : "", (unsigned long long)g_first_dummy, (unsigned long long)g_first_dummy_big,
+               (unsigned long long)g_seen_kept, (unsigned long long)g_seen_dropped, seen_keep()); } }
+    uint32_t *w = (uint32_t *)g_seen_buf.contents; unsigned words = MIN((unsigned)g_ntreg / 32 + 1, (unsigned)POOL_SEEN_WORDS);
+    // Every mark first, as the walk below may stop at the read budget: the frame of each mark found, and every SEEN_REARM frames the marks taken back (an exchange, so a bit a shader
+    // sets meanwhile is either taken here or stays for the next scan)
+    int keep = seen_keep() > 0, rearm = keep && f >= g_seen_rearm + SEEN_REARM; if (rearm) g_seen_rearm = f;
     for (unsigned i = 0; i < words; i++) {
-        uint32_t fresh = w[i] & ~g_seen_done[i];
+        uint32_t got = rearm ? atomic_exchange_explicit((_Atomic uint32_t *)w + i, 0, memory_order_relaxed) : w[i];
+        if (!got) continue;
+        if (keep) for (uint32_t bits = got; bits; bits &= bits - 1) g_seen_at[i * 32 + __builtin_ctz(bits)] = (uint32_t)f;
+        uint32_t fresh = got & ~g_seen_done[i];
         if (fresh) { g_seen_done[i] |= fresh; g_seen_todo[i] |= fresh; for (uint32_t bits = fresh; bits; bits &= bits - 1) { pool_ds_note((int)i * 32 + __builtin_ctz(bits)); pool_first_read((int)i * 32 + __builtin_ctz(bits), f); } }
+    }
+    for (unsigned i = 0; i < words; i++) {
         for (uint32_t bits = g_seen_todo[i]; bits; bits &= bits - 1) {
             int b = __builtin_ctz(bits), id_ = (int)i * 32 + b;
             if (id_ <= 0 || id_ >= g_ntreg || !g_treg[id_].ok || g_treg[id_].gone || (!g_treg[id_].view && !tex_storage_live(&g_treg[id_].t))) { g_seen_todo[i] &= ~(1u << b); continue; } // NOLINT(clang-analyzer-core.BitwiseShift): bits is nonzero, so ctz returns 0..31

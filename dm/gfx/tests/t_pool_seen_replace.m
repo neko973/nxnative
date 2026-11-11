@@ -1,4 +1,4 @@
-// A texture ID a shader has read keeps its read mark when the game puts another texture into it, and loses it only when emptied (mtl_reg_tex).
+// A texture ID a shader has read keeps its read mark when the game puts another texture into it, and loses it when emptied or not read within DM_NVN_SEEN_KEEP frames (mtl_reg_tex).
 // Zero ordinary walk room exercises first-table materialization and GPU pixels.
 // Finalize-before-replace, a read ID whose texture is not made yet, unread IDs and unwritten render targets stay distinct.
 #include "../nvn/nvn_mtl.m"
@@ -87,7 +87,19 @@ int main(void) { @autoreleasepool {
     mtl_reg_tex(10,&t[0],NULL); id<MTLBuffer> reset=table();
     CHECK(!pool_seen(10),"empty then re-register does not resurrect history");
     (void)reset;
-    mtl_reg_tex(10,NULL,NULL); mtl_reg_tex(20,NULL,NULL); mtl_reg_tex(30,NULL,NULL);
+    // A mark found last more than DM_NVN_SEEN_KEEP frames ago goes with the ID's next texture; the GPU's marks are taken back every SEEN_REARM frames and a read sets them again
+    mtl_reg_tex(40,&t[2],NULL); read_mark(40); (void)table();
+    CHECK(pool_seen(40) && (!seen_keep() || g_seen_at[40]==(uint32_t)atomic_load(&g_cur_frame)),"a read notes the frame it was found in");
+    if (seen_keep()) {   // DM_NVN_SEEN_KEEP=0: marks stay for good
+        atomic_fetch_add(&g_cur_frame,SEEN_REARM); (void)table();
+        CHECK(!(((uint32_t *)g_seen_buf.contents)[40/32] & 1u<<(40%32)) && pool_seen(40),"the GPU's mark is taken back, the host's stays");
+        atomic_fetch_add(&g_cur_frame,(uint64_t)seen_keep()+1); (void)table();
+        mtl_reg_tex(40,&t[6],NULL);
+        CHECK(!pool_seen(40),"a texture streamed into an ID not read within the keep window drops its mark");
+    }
+    read_mark(40); (void)table(); mtl_reg_tex(40,&t[4],NULL);
+    CHECK(pool_seen(40),"an ID read again since keeps its mark through the next texture");
+    mtl_reg_tex(10,NULL,NULL); mtl_reg_tex(20,NULL,NULL); mtl_reg_tex(30,NULL,NULL); mtl_reg_tex(40,NULL,NULL);
     for(int n=0;n<N;n++) if(n!=1) mtl_tex_release(&t[n]);
     mtl_pool_del(mem); mtl_drain(); munmap(mem,LEN);
     fprintf(stderr,"pool_seen_replace: %d checks, %d failed\n",checks,failed);
