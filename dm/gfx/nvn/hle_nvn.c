@@ -2378,7 +2378,7 @@ static void fstep_tick(const win_t *o, int c) {
     // fewer frames, so frames up to 3.3 ms over still keep the hold: they are shown as soon as they are ready (mtl_link_wait_ticks does not wait for a tick already past) and the
     // step pays the time back. Ocarina of Time's Kokiri village at full resolution on an M3 Pro (GPU 22 ms, frames 24-27 ms): 60-67% of a walk at 40 fps and the rest at 30 before
     g_fs.late_tol = fs_t120() ? (g_fs.k >= 3 ? 4 : 2) * FSTEP_LATE : 0; g_fs.up_tol = fs_t120() ? 4 * FSTEP_LATE : 0;
-    g_fs.hold_cap = fs_t120() ? 3600 : 0;   // ticks mode: after failed trials the next one waits up to 60 s (1, 4, 16, 60 s), not 8
+    g_fs.hold_cap = fs_t120() && g_fs.k <= 3 ? 3600 : 0;   // ticks mode: after failed trials for 60 fps the next one waits up to 60 s (1, 4, 16, 60 s), not 8; from 30 fps the 8 s stay
     g_fs.kcap = fs_t120() ? 6 : 0;   // 40 fps: steps up to 6 ticks (3 vsyncs, as in whole vsyncs), so hold 4 can still pay back
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + (fs_t120() ? 0x2c : 0x20)), (uint32_t)n, __ATOMIC_RELAXED);   // 40 fps: the step in ticks of 1/120 s (the stub reads +0x2c first)

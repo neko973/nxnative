@@ -84,6 +84,7 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     if (kmax > smax) kmax = smax;
     if (kmax < kmin) kmax = kmin;
     if (!s->hold) s->hold = hold0;
+    if (s->hold > hcap) s->hold = hcap;   // the caller lowered the cap (ticks mode at hold 4: back to 40 fps is tried every 8 s at most, not every 60)
     if (fixed > 0) {   // the game's own step: speed is right by construction, nothing to pay back
         s->k = s->step = fixed < smax ? fixed : smax;
         s->debt = 0; s->late_run = s->fit_run = s->trial = s->probe = s->grace = 0; s->run = 0;
