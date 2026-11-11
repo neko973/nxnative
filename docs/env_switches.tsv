@@ -407,3 +407,4 @@ DM_XV_FILE	path	File where the attachment validity ledger keeps the keys it disa
 DM_YIELD_BACKOFF	switch	`0` turns off the yield back-off; `=<cap µs>[:<start µs>]` sets its sleep cap and the run of yields after which it starts (default 250:2000)
 DM_YIELD_CLOCK	diagnostic	Clock-reading yield loops: 0 uses ordinary yield backoff, 1 backs off from the start, 2 also sleeps to the predicted end (default)
 DM_GFX_SCALE	switch	`=0`, `1` or `2`: the graphics scale tier answered to the game (Switch 2) whatever the operation mode; unset, 0 handheld and 1 docked. Ocarina of Time draws 2560x1440 with tier 0 and 2048x1152 with 1
+DM_NVN_DEFER_LOAD	switch	`=1` defers a pass that loads its attachments to its next pass on the same targets, when only depth-only passes lie between them (Ocarina of Time's shadow-casting lights: eleven one-draw passes on a full-size mask become one); with `DM_NVN_TBDR=1` it also lifts that mode's rule that a deferred pass starts with a clear
