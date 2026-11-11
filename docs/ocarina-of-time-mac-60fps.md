@@ -32,6 +32,7 @@ The picture is the one the game draws docked with graphics scale tier 1: 3D pass
 
 Host (Metal renderer and frame pacing), in the order of their effect:
 
+- **Light passes drawn as one** (`DM_NVN_DEFER_LOAD=1`). The game draws each shadow-casting light as a small depth-only shadow map and then one light volume (a box of 36 vertices) into a full-size mask that it loads: eleven one-draw passes a frame in Kokiri village, each loading colour and depth and storing colour for one box. The renderer's pass deferral took only passes that start with a clear; with the switch a loading pass is deferred past the depth-only passes to its next pass on the same targets, so the eleven boxes are one pass after the eleven shadow maps. It runs without the rest of TBDR mode (which costs this game about 1 ms a frame) and only in that narrow shape. In the village walk the on-screen frame interval was over 17.5 ms for 10 % of frames without it and 0-4 % with it (GPU p50 in the heaviest stretch 17.9 → 16.8-17.1 ms on an afternoon with other applications running); an 11-minute roam: 59.9 fps, on-screen interval p95 16.8 / p99 17.9 / max 33 ms. The picture was compared in seven areas inside one run each (`DM_NVN_DEFER_AB=1` turns the deferral on after the second screenshot).
 - **Event gate** (`DM_NVN_EVENT_GATE=1`). Each frame the game queues its second large command list behind a wait for an event that its CPU signals once the first list's fence has passed. The host used to translate that list only when the wait was satisfied, and the GPU sat idle about 2.6 ms of every frame meanwhile. The wait is now put on the Metal queue itself (`waitForEvent`), and the commands behind it are translated and committed ahead of time; a watcher thread opens the gate within 50 µs of the game's signal. Only events that no command list ever signals, and whose waits were seen to block and pass 30 times within 40 ms, are gated; a gate that is not opened within 100 ms is forced open, that event is never gated again, and three forced gates turn the feature off for the run.
 - **Pool-table buffers are reused** (96 spares instead of 16). The game patches 10-15 pool tables a frame; with 16 spares about four new 312 KB buffers were made every frame, each a residency-set add and remove. This removed most of the frames whose GPU time doubled (75 → 13 per walk).
 - **MetalFX takes the upscale of `agl_ndsr_vr` again** (`DM_UPSCALER=metalfx`). Without it the game's own temporal upscaler ran every frame (about 1.6 ms of GPU) and ghosted the player character while turning.
@@ -47,7 +48,7 @@ Two more shader changes from open upstream pull requests, both by people measuri
 
 Taken from other people's work, with thanks: upstream pull requests #1752 (deanpektas27 and seedds; port by AmateurWizrd), #2308 (AmateurWizrd), #1952 (compute hoist, AdyaGMD), #2226 and #2030 (humanperzeus), #2193 (Know-It-All-Brother), the clock keeper of #1847 (seedds, off here), the FeReuss/nxnative-oot fork (float add, border corrections, barrier bits, render-scale stub) and the cheemu/kid-with-sword-remake fork (raw lookup cache). Their commits keep their authors.
 
-Also taken from upstream after the base: `1d090a66` (uniform slots bounded at 256-byte multiples: white streaks and one-frame dropouts), `6a6a018d` (no stand-in pipelines for predicted keys whose base is made), `1e69c180` (a write to a page two pools share is no longer missed), and the open pull requests #2260 (texture views cached by Metal texture) and #2263 (partial texture re-uploads). #2260's `enc_thread on` for this game is not taken: the event gate does not run with the encode thread.
+Also taken from upstream after the base: `1d090a66` (uniform slots bounded at 256-byte multiples: white streaks and one-frame dropouts), `6a6a018d` (no stand-in pipelines for predicted keys whose base is made), `1e69c180` (a write to a page two pools share is no longer missed), and the open pull requests #2344 (a texture ID's read mark is dropped after 600 frames unread, so area loads no longer freeze an hour into a session), #2260 (texture views cached by Metal texture) and #2263 (partial texture re-uploads). #2260's `enc_thread on` for this game is not taken: the event gate does not run with the encode thread.
 
 Tried and not kept as defaults, because they gave nothing on this machine: `DM_NVN_TBDR=1` (pass merging), the compute hoist (`DM_NVN_CS_HOIST`, set to 0 below), smaller or no segment cuts without the gate, and the GPU clock keeper at full or automatic duty (its own work costs up to 1 ms a frame while the game is at its shortest hold; `hold` mode avoids that).
 
@@ -80,6 +81,7 @@ DM_NVN_CUT=0
 DM_NVN_CS_HOIST=0
 DM_GPU_KEEP=hold
 DM_PRESENT_LINK=0
+DM_NVN_DEFER_LOAD=1
 DM_FOCUS_KEEP=1
 DM_METAL_HUD=1
 ```
@@ -96,6 +98,8 @@ The log is `~/Library/Logs/nxnative/0400486024DEC000.log`. After a minute of pla
 - `60 fps in ticks: the screen shows 120 Hz` (with `DM_FPS_TICKS=1` on a 120 Hz screen).
 - `upscaler: first dispatch of fa3033d05c0a41d6_b drawn by MetalFX`.
 - `frame step: game time X s in Y s (1.000 of real time); held 2 / 3 / 4 ticks a / b / c frames`: the share of frames at 60, 40 and 30 fps, and the game's speed.
+
+When judging smoothness from a `DM_NVN_TSV` table, read `@display_ms` (the on-screen interval, what the HUD's line shows), not `@frame_ms` (the game-side interval, which alternates when the game runs ahead of the screen).
 
 Useful numbers to report with a result: the Mac and its GPU core count, fullscreen or window, the area, and a few of the `timing up to frame` lines (frame time and GPU p50 / p95).
 

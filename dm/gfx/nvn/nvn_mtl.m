@@ -12301,7 +12301,7 @@ static void defer_env(void) { const char *x = getenv("DM_NVN_DEFER_AB"), *e = ge
 static int defer_on(void) {
     if (!g_defer_env_ab) return (tbdr_on() || defer_load_on()) && !g_defer_env_off;
     if (g_defer_ab < 0) { g_defer_ab = 0; g_defer_ab_on = 0; }
-    return tbdr_on() && (g_defer_ab || g_defer_ab_on); }
+    return (tbdr_on() || defer_load_on()) && (g_defer_ab || g_defer_ab_on); }
 static int defer_handle_sub(uint64_t h, const p_set_rt *r, int k, int cover) {
     int tid = (int)(h & 0xfffff); if (!tid || tid >= g_ntreg || !g_treg[tid].ok) return 0;
     uint64_t ser; int lv, sl; rt_sub(r, k, &ser, &lv, &sl); if (!ser || g_treg[tid].t.serial != ser) return 0;
