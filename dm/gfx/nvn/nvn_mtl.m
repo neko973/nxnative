@@ -2297,7 +2297,34 @@ static void gpu_tag_begin(uint64_t f) {
     if (atomic_load(&g_gpu[k].frame) != f) { atomic_store(&g_gpu[k].frame, f); atomic_store(&g_gpu[k].ns, 0); atomic_store(&g_gpu[k].pending, 0); atomic_store(&g_gpu[k].t0, UINT64_MAX); atomic_store(&g_gpu[k].t1, 0); }
     atomic_fetch_add(&g_gpu[k].pending, 1);
 }
+// ---------- Event gate (DM_NVN_EVENT_GATE=1) ----------
+// A queue's wait for an event the game's CPU signals (nvn_queue.inc nq_gate_try) is put on the Metal queue itself: everything committed after it stays behind the wait until
+// mtl_gate_open sets the shared event, so the host can replay and commit the commands that follow the wait while the GPU still runs what came before it. Ocarina of Time
+// queues the second big command list of a frame (about 300 KB) behind such a wait and signals it when the first list's fence has passed; replayed only then, the list left
+// the GPU idle about 2.6 ms of every frame (three gaps of 0.6-1.3 ms while its first command buffers were encoded). Not with the encode thread (the wait would be recorded)
+static id<MTLSharedEvent> g_gate_ev; static uint64_t g_gate_v;
+uint64_t mtl_gate_close(void) {
+    if (!g_q4 || rec_on()) return 0;
+    if (!g_gate_ev) g_gate_ev = [g_dev newSharedEvent];
+    uint64_t v = ++g_gate_v; [g_q4 waitForEvent:g_gate_ev value:v];
+    return v;
+}
+void mtl_gate_open(uint64_t v) { id<MTLSharedEvent> ev = g_gate_ev; if (ev && ev.signaledValue < v) ev.signaledValue = v; }
+// DM_NVN_SEQ=<frame> (diagnostic): for 4 frames from that one, a "[seq]" line with the Mach time (ms) for each submit / fence / SyncWait / acquire / present of the game, each
+// command buffer the host commits and each one's GPU start and end: the order of the frame's start, where the GPU waits for the next frame's first commands
+void dm_seq(const char *what, uint64_t a, uint64_t b) {
+    static long f0 = -2; if (f0 == -2) { const char *e = getenv("DM_NVN_SEQ"); f0 = e ? atol(e) : -1; }
+    if (__builtin_expect(f0 < 0, 1)) return;
+    uint64_t f = atomic_load(&g_cur_frame); if ((long)f < f0 || (long)f >= f0 + 4) return;
+    MLOG("[seq] F%llu t=%.3f %s %llu %llu", (unsigned long long)f, (double)(now_ns() % 100000000000ull) / 1e6, what, (unsigned long long)a, (unsigned long long)b);
+}
+static void dm_seq_gpu(uint64_t f, double g0, double g1) {
+    static long f0 = -2; if (f0 == -2) { const char *e = getenv("DM_NVN_SEQ"); f0 = e ? atol(e) : -1; }
+    if (f0 < 0 || (long)f < f0 - 1 || (long)f >= f0 + 4) return;
+    MLOG("[seq] F%llu gpu %.3f .. %.3f (%.3f ms)", (unsigned long long)f, fmod(g0 * 1e3, 1e8), fmod(g1 * 1e3, 1e8), (g1 - g0) * 1e3);
+}
 static void gpu_tag_done(uint64_t f, double g0, double g1) {
+    dm_seq_gpu(f, g0, g1);
     unsigned k = f % GRING;
     if (atomic_load(&g_gpu[k].frame) != f) return;
     double d = g1 - g0;
@@ -2410,6 +2437,7 @@ uint64_t mtl_sub_commit(void) {
     if (n) memcpy(ops, g_post, n * sizeof *ops);
     NSArray<dispatch_block_t> *commit_blocks = [g_commit_blocks copy];
     MTL4CommitOptions *o = [MTL4CommitOptions new];
+    dm_seq("commit", (uint64_t)atomic_load(&g_seg_inflight), 0);
     atomic_fetch_add(&g_seg_inflight, 1);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; atomic_fetch_sub(&g_seg_inflight, 1); for (dispatch_block_t block in commit_blocks) block(); }];
     uint64_t gpu_f = atomic_load(&g_cur_frame); gpu_tag_begin(gpu_f);
@@ -15048,6 +15076,7 @@ static void sub_cut(void) {
     if (seg_ts()) { if (!g_sclk) { g_sclk = calloc(1, sizeof *g_sclk); atomic_store(&g_sclk->refs, 1); } sc = g_sclk; atomic_fetch_add(&sc->refs, 1); }
     cbs_list *cbs = cbs_take(); uint64_t cbs_fence = g_fence + 1;
     MTL4CommitOptions *o = [MTL4CommitOptions new];
+    dm_seq("commit", (uint64_t)atomic_load(&g_seg_inflight), 0);
     atomic_fetch_add(&g_seg_inflight, 1);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
         atomic_fetch_sub(&g_seg_inflight, 1);

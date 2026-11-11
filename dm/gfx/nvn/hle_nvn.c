@@ -823,10 +823,12 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
 
 // ---------- Sync / events ----------
 NVN(nvnSyncInitialize, NVNboolean, NVNsync *s, NVNdevice *d) { (void)d; *(sync_t *)s = (sync_t){MAGIC('S', 'Y', 'N', 'C'), 0, 0}; return 1; }
+void dm_seq(const char *what, uint64_t a, uint64_t b);   // nvn_mtl.m (DM_NVN_SEQ)
+uint64_t mtl_last_fence(void);
 NVN(nvnSyncFinalize, void, NVNsync *s) { nvn_sync_release((sync_t *)s); ((sync_t *)s)->magic = 0; }
 NVN(nvnSyncSetDebugLabel, void, NVNsync *s, const char *l) { (void)s; (void)l; }
 // Fence = "all commands previously submitted to the queue have completed": record the fence value of the most recent submit
-NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)c; (void)f; nvn_queue_fence((queue_t *)q,(sync_t *)s); }
+NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)c; (void)f; nvn_queue_fence((queue_t *)q,(sync_t *)s); dm_seq("fence", ((sync_t *)s)->fence, 0); }
 // A sync object that was never fenced waits until timeout, as on a real device; a fenced one is released only after the GPU has actually completed up to that fence value
 // Queue dependencies capture the current logical receipt; later re-fencing or finalizing the sync cannot retarget work already queued.
 NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) { nvn_queue_wait_sync((queue_t *)q,(const sync_t *)s); return 1; }
@@ -840,10 +842,12 @@ static _Atomic uint64_t g_sync_ns;
 NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     const sync_t *o = (const sync_t *)s;
     if (!o->fenced) return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
-    if(o->fenced==3) { if(nvn_sync_wait(o,0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED; uint64_t t0=now_ns(); int ok=nvn_sync_wait(o,timeout); atomic_fetch_add(&g_sync_ns,now_ns()-t0); return ok?NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED:NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED; }
+    if(o->fenced==3) { if(nvn_sync_wait(o,0)) { dm_seq("syncwait-already",0,0); return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED; } dm_seq("syncwait>",0,0); uint64_t t0=now_ns(); int ok=nvn_sync_wait(o,timeout); dm_seq("syncwait<",0,(now_ns()-t0)/1000); atomic_fetch_add(&g_sync_ns,now_ns()-t0); return ok?NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED:NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED; }
     int (*w)(uint64_t, uint64_t) = o->fenced == 2 ? mtl_wait_acq : mtl_wait;
     if (w(o->fence, 0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
+    dm_seq("syncwait>", o->fence, mtl_last_fence());
     uint64_t t0 = now_ns(); int ok = w(o->fence, timeout); atomic_fetch_add(&g_sync_ns, now_ns() - t0);   // the frame's blocked SyncWait time (@sync_ms)
+    dm_seq("syncwait<", o->fence, (now_ns() - t0) / 1000);
     return ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
 }
 NVN(nvnEventBuilderSetDefaults, void, NVNeventBuilder *b) { memset(b, 0, sizeof(ev_builder_t)); }
@@ -1697,7 +1701,9 @@ void dm_gfx_quit(int wait_ms) { mtl_arch_save(wait_ms, 1); }
 #include "nvn_queue.inc"
 NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h) {
     ((queue_t *)q)->submits++;
+    dm_seq("submit>", (uint64_t)n, 0);
     nvn_queue_submit((queue_t *)q,n,(const uint64_t *)h);
+    dm_seq("submit<", (uint64_t)n, 0);
 }
 
 // Commands that only affect GPU state / only execute on the GPU: the null device only counts them (the thunk has already counted)
@@ -1806,6 +1812,7 @@ uint64_t dm_nvn_frame_count(void) { return g_frame; }
 extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
 NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
     win_t *o = (win_t *)w;
+    dm_seq("acquire", 0, 0);
     int n = window_active(o);
     *idx = n ? o->next++ % n : 0;
     // Vsync blocks here (real-device NVN: when all textures in the swapchain are waiting for display, wait for the next one to be released), not in present -- the game often calls present while holding a lock
@@ -2377,7 +2384,10 @@ static void fstep_tick(const win_t *o, int c) {
     // Ticks of 1/120 s: the same 1.7 ms as in vsyncs at hold 2 (60 fps: a scene that misses it runs evenly at 40). From hold 3 (40 fps) the next hold is 30 fps, a quarter
     // fewer frames, so frames up to 3.3 ms over still keep the hold: they are shown as soon as they are ready (mtl_link_wait_ticks does not wait for a tick already past) and the
     // step pays the time back. Ocarina of Time's Kokiri village at full resolution on an M3 Pro (GPU 22 ms, frames 24-27 ms): 60-67% of a walk at 40 fps and the rest at 30 before
-    g_fs.late_tol = fs_t120() ? (g_fs.k >= 3 ? 4 : 2) * FSTEP_LATE : 0; g_fs.up_tol = fs_t120() ? 4 * FSTEP_LATE : 0;
+    // (11-11) the same 3.3 ms at hold 2: with the event gate and fullscreen presentation Ocarina of Time's field, house and village run 16.7-16.8 ms a frame (p95 18.2-19.0),
+    // and at 1.7 ms the hold left 60 fps for 40 on three frames of 18.4 ms and came back only by a probe; DM_FPS_LATE_TICKS=<ticks> overrides both
+    { static double lt = -1; if (lt < 0) { const char *e = getenv("DM_FPS_LATE_TICKS"); lt = e ? atof(e) : 0.4; if (!(lt > 0 && lt < 1)) lt = 0.4; }
+      g_fs.late_tol = fs_t120() ? lt : 0; g_fs.up_tol = fs_t120() ? lt : 0; }
     g_fs.hold_cap = fs_t120() && g_fs.k <= 3 ? 3600 : 0;   // ticks mode: after failed trials for 60 fps the next one waits up to 60 s (1, 4, 16, 60 s), not 8; from 30 fps the 8 s stay
     g_fs.kcap = fs_t120() ? 6 : 0;   // 40 fps: steps up to 6 ticks (3 vsyncs, as in whole vsyncs), so hold 4 can still pay back
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
@@ -2428,6 +2438,7 @@ static const int *present_crop(const int win[4], int tw, int th, int lc[4]) {
 }
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++;
+    dm_seq("present", (uint64_t)idx, 0);
     dm_ue_cvar_tick();
     if (fps_high()) high_cap_tick(); else if (fs_t120()) t120_tick();
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 4), (uint32_t)dm_movie_playing(), __ATOMIC_RELAXED);   // the stubs' copy of the movie state (hle.h)

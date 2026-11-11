@@ -1,3 +1,4 @@
+void dm_seq(const char *what, uint64_t a, uint64_t b);   // nvn_mtl.m (DM_NVN_SEQ)
 #include "nvn_capture.h"
 #include "nvn_hmap.h"
 
@@ -11,7 +12,7 @@ typedef struct nq_signal { volatile uint32_t *event; unsigned mode; uint32_t val
 typedef struct nq_node {
     struct nq_node *next;
     uint8_t *bytes; size_t length, capacity;
-    unsigned kind, mode, closed, waiting; volatile uint32_t *event; uint32_t value;
+    unsigned kind, mode, closed, waiting; volatile uint32_t *event; uint32_t value; uint64_t block_t0; volatile uint32_t *gate_word;   // when an event wait first blocked and for which event word (the event gate's learning: a satisfied wait's event is cleared)
     uint64_t wait_fence, event_predecessor; unsigned wait_kind; const sync_t *sync_source; nq_receipt *receipt;
     nq_signal *signals; unsigned signal_count;   // NQ_COMMANDS: every event signal it records, in order (nq_event_issued at its commit)
     tex_t texture; double period; int crop[4];
@@ -52,7 +53,8 @@ typedef struct nq_event_write { struct nq_event_write *next; volatile uint32_t *
 static nq_event_write *nq_event_writes;
 static uint64_t nq_event_pending(volatile uint32_t *word) { for(nq_event_write *w=nq_event_writes;w;w=w->next) if(w->word==word) return w->fence; return 0; }
 static nq_event_write *nq_event_write_of(volatile uint32_t *word) { nq_event_write *w=nq_event_writes; while(w && w->word!=word) w=w->next; return w; }
-static void nq_event_issued(volatile uint32_t *word,uint64_t fence,unsigned mode,uint32_t value) {
+static void nq_gate_listed(volatile uint32_t *w);   // the event gate: this event is signalled by a command list, so a wait for it is never gated
+static void nq_event_issued(volatile uint32_t *word,uint64_t fence,unsigned mode,uint32_t value) { nq_gate_listed((volatile uint32_t *)word);
     nq_event_write *w=nq_event_write_of(word);
     if(!w) { w=calloc(1,sizeof *w); if(!w) die("event ordering allocation failed"); w->word=word; w->next=nq_event_writes; nq_event_writes=w; }
     w->fence=fence; w->value=value; w->exact=mode==0;
@@ -109,6 +111,45 @@ static void nq_cost_end(nq_cost c) {
     atomic_fetch_add(&g_sub_instr,ins-c.instr); atomic_fetch_add(&g_cum_sub_instr,ins-c.instr);
     atomic_fetch_add(&g_cum_sub_cyc,cyc-c.cycles); atomic_fetch_add(&g_cum_sub_sys_ns,thr_sys_ns()-c.sys);
 }
+// The event gate (nvn_mtl.m mtl_gate_close): one at a time. The watcher opens the Metal queue's wait when the game's event word satisfies the wait, within 50 us; an event that
+// does not come within 100 ms opens it anyway and turns gating off for the run (a signal that depended on work behind the gate: the wait blocks the replay again, as before)
+uint64_t mtl_gate_close(void); void mtl_gate_open(uint64_t v);
+static struct { int active; volatile uint32_t *word; unsigned mode; uint32_t value; uint64_t v, t0; } nq_gate;
+// An event is gated only once its waits have blocked and passed NQ_GATE_LEARN times, each within NQ_GATE_FAST_NS: the per-frame handshake of a running game, not a wait of its
+// start or of a loading screen (Ocarina of Time's first such wait took over 100 ms). An event whose gate had to be forced open is never gated again
+enum { NQ_GATE_WORDS=64, NQ_GATE_LEARN=30 }; static const uint64_t NQ_GATE_FAST_NS=40000000ull;
+static struct { volatile uint32_t *word; uint32_t fast; int bad; } nq_gate_words[NQ_GATE_WORDS];
+static int nq_gate_word(volatile uint32_t *w,int make) { int fr=-1; for(int i=0;i<NQ_GATE_WORDS;i++) { if(nq_gate_words[i].word==w) return i; if(!nq_gate_words[i].word && fr<0) fr=i; } if(make && fr>=0) { nq_gate_words[fr].word=w; nq_gate_words[fr].fast=0; nq_gate_words[fr].bad=0; return fr; } return -1; }
+static void nq_gate_listed(volatile uint32_t *w) { int i=nq_gate_word(w,1); if(i>=0) nq_gate_words[i].bad=1; }
+static void nq_gate_learn(volatile uint32_t *w,uint64_t waited_ns) { int i=nq_gate_word(w,1); if(i<0) return; if(waited_ns<=NQ_GATE_FAST_NS) nq_gate_words[i].fast++; else nq_gate_words[i].fast=0; }
+static pthread_cond_t nq_gate_cv=PTHREAD_COND_INITIALIZER; static int nq_gate_state=-1; static uint64_t nq_gate_n, nq_gate_forced, nq_gate_ns;
+static void *nq_gate_watch(void *unused) {
+    (void)unused; pthread_setname_np("NVN event gate");
+    for(;;) {
+        pthread_mutex_lock(&nq_mu); while(!nq_gate.active) pthread_cond_wait(&nq_gate_cv,&nq_mu);
+        volatile uint32_t *w=nq_gate.word; unsigned mode=nq_gate.mode; uint32_t value=nq_gate.value; uint64_t v=nq_gate.v, t0=nq_gate.t0; pthread_mutex_unlock(&nq_mu);
+        int forced=0;
+        for(;;) { if(nq_predicate(atomic_load_explicit((_Atomic uint32_t *)w,memory_order_acquire),mode,value)) break; if(now_ns()-t0>100000000ull) { forced=1; break; } usleep(50); }
+        mtl_gate_open(v); dm_seq(forced?"gate-forced":"gate-open",v,(now_ns()-t0)/1000);
+        pthread_mutex_lock(&nq_mu); nq_gate.active=0; nq_gate_ns+=now_ns()-t0; if(forced) { nq_gate_forced++; int wi=nq_gate_word(w,1); if(wi>=0) nq_gate_words[wi].bad=1; if(nq_gate_forced>=3) nq_gate_state=0; }
+        uint64_t gn=nq_gate_n, gns=nq_gate_ns; pthread_cond_broadcast(&nq_cv); pthread_mutex_unlock(&nq_mu);
+        if(forced) LOG("[RED] [nvn] event gate: the game's event %p did not come within 100 ms of the wait; the gate was opened and this event is not gated again (%llu forced so far; gating goes off at 3)",(void *)w,(unsigned long long)nq_gate_forced);
+        else if(gn%1800==0) LOG("[nvn] event gate: %llu waits put on the Metal queue so far, open after %.2f ms on average",(unsigned long long)gn,gns/1e6/gn);
+    }
+    return NULL;
+}
+static int nq_gate_try(nq_job *j,nq_node *n,uint64_t predecessor) {   // nq_mu held; n is a wait for an event that is not there yet
+    if(nq_gate_state<0) { const char *e=getenv("DM_NVN_EVENT_GATE"); nq_gate_state=e && atoi(e)>0;
+        if(nq_gate_state) { pthread_t t; if(pthread_create(&t,NULL,nq_gate_watch,NULL)) nq_gate_state=0; else { pthread_detach(t); LOG("[nvn] event gate on (DM_NVN_EVENT_GATE): a wait for an event the game signals from the CPU goes on the Metal queue, and the commands after it are replayed ahead"); } } }
+    if(nq_gate_state<=0 || nq_gate.active || predecessor>mtl_completed_fence()) return 0;
+    { int wi=nq_gate_word(n->event,0); if(wi<0 || nq_gate_words[wi].bad || nq_gate_words[wi].fast<NQ_GATE_LEARN) return 0; }
+    nq_node *nx=n->next ? n->next : j->next ? j->next->first : NULL;
+    if(!nx || nx->kind!=NQ_COMMANDS) return 0;   // nothing to replay ahead yet
+    uint64_t v=mtl_gate_close(); if(!v) return 0;
+    nq_gate.word=(volatile uint32_t *)n->event; nq_gate.mode=n->mode; nq_gate.value=n->value; nq_gate.v=v; nq_gate.t0=now_ns(); nq_gate.active=1; nq_gate_n++;
+    pthread_cond_signal(&nq_gate_cv); dm_seq("gate-close",v,0);
+    return 1;
+}
 static void *nq_worker(void *unused) {
     (void)unused; pthread_setname_np("NVN queue replay");
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
@@ -130,7 +171,7 @@ static void *nq_worker(void *unused) {
                     // for the writer's completion left the GPU idle while the host encoded the next submission, 2 ms of its 14.5 ms frame, which its dynamic resolution read as work
                     nq_event_write *queued=predecessor>mtl_completed_fence() ? nq_event_write_of(n->event) : NULL;
                     if(queued && queued->exact && nq_predicate(queued->value,n->mode,n->value)) break;
-                    if(predecessor>mtl_completed_fence() || !nq_predicate(atomic_load_explicit((_Atomic uint32_t *)n->event,memory_order_acquire),n->mode,n->value)) { n->waiting=1; mapped_event_wait=1; continue; }
+                    if(predecessor>mtl_completed_fence() || !nq_predicate(atomic_load_explicit((_Atomic uint32_t *)n->event,memory_order_acquire),n->mode,n->value)) { if(nq_gate_try(j,n,predecessor)) break; if(!n->waiting) { n->block_t0=now_ns(); n->gate_word=n->event; } if(!n->waiting) dm_seq("evwait-block",(uint64_t)(uintptr_t)n->event&0xffffff,predecessor>mtl_completed_fence()?predecessor-mtl_completed_fence():0); n->waiting=1; mapped_event_wait=1; continue; }
                 }
                 if(n->kind==NQ_SYNC) {
                     if(n->receipt && !n->receipt->published) continue;
@@ -147,6 +188,8 @@ static void *nq_worker(void *unused) {
             else pthread_cond_wait(&nq_cv,&nq_mu);
         }
         j->first=n->next; if(!j->first) j->last=NULL;
+        if(n->kind==NQ_EVENT && n->waiting && n->block_t0 && nq_gate_state>0) nq_gate_learn(n->gate_word,now_ns()-n->block_t0);   // nq_mu is held here
+        if(n->kind==NQ_EVENT) dm_seq(n->waiting?"evwait-pass-after-block":"evwait-pass",(uint64_t)(uintptr_t)n->event&0xffffff,0); else if(n->kind==NQ_SYNC) dm_seq("qsync-pass",0,0); else if(n->kind==NQ_FENCE) dm_seq("qfence",0,0);
         // Round-robin ready queues: a continually fed independent producer cannot starve another queue.
         if(q->next) { nq_queue **link=&nq_queues; while(*link!=q) link=&(*link)->next; *link=q->next; nq_queue *tail=nq_queues; while(tail->next) tail=tail->next; tail->next=q; q->next=NULL; }
         if(n->kind==NQ_SYNC || n->kind==NQ_EVENT) { uint64_t f=n->receipt?n->receipt->fence:n->wait_fence; if(f>q->physical) q->physical=f; }
@@ -162,11 +205,15 @@ static void *nq_worker(void *unused) {
             if(n->kind==NQ_COMMANDS) {
                 uint64_t handle=(uintptr_t)n->bytes;
                 nvn_cap_submit(1,&handle);
+                dm_seq("replay>",(uint64_t)n->length,0);
                 mtl_sub_begin(); nvn_ft_poll(); mtl_sub_index(&handle,1);
                 mtl_exec_rest(NULL,0); mtl_exec(n->bytes); fence=mtl_sub_commit();
+                dm_seq("replay<",(uint64_t)n->length,fence&0xffffff);
             } else {
                 nvn_cap_present(&n->texture,n->crop);
+                dm_seq("qpresent>",0,0);
                 present=mtl_present(&n->texture,n->period,n->crop); mtl_tex_unpin(n->texture.serial);
+                dm_seq("qpresent<",0,0);
             }
             nq_cost_end(cost); gfx_leave(); objc_autoreleasePoolPop(pool); pthread_mutex_unlock(&g_sub_mu);
         }
