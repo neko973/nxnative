@@ -49,6 +49,9 @@ typedef struct {
     double pa, pb; int plate, ptotal;   // the current grace window: the cost of its first and second halves (sums), its late frames; grace frames this probe has taken in all
     double hold, since;       // vsyncs a trial waits for after a step up; vsyncs since the last step up
     int kcap;                 // set by the caller: the largest step (FSTEP_MAX when 0); 40 fps in ticks of 1/120 s (hle_nvn.c fs_t120) takes 6
+    double hold_cap;          // set by the caller: the longest wait between trials after failed ones, in vsyncs (0 = FSTEP_HOLD_MAX, 8 s), reached by quadrupling instead of doubling.
+                              // Ocarina of Time's village at 40 fps (GPU 18 ms) was probed back to 60 every 8 s for good, each probe 33 frames of uneven intervals (the Metal
+                              // HUD's frame interval graph mostly red); with 60 s a scene that cannot hold the shorter hold is asked once a minute
     double up_tol;            // set by the caller: a step up takes the hold the cost is within this of (0 = late_tol, or 0.05): the tolerance of the hold it would move to
     double late_tol;          // set by the caller: what a frame may take over its hold before it is late, in the caller's unit (0 = FSTEP_LATE). In ticks of 1/120 s FSTEP_LATE is
                               // 0.83 ms, half the 1.7 ms it stands for: Ocarina of Time's village (GPU 22-24.5 ms, frames 24-26.5 ms) left hold 3 for 4 on frames of 25.6-26.5 ms
@@ -74,6 +77,7 @@ static inline int nvn_fstep_same(const nvn_fstep *s) { return s->cref > 0 && s->
 // against kmin (probes). Returns the step for the next frame; s->k is how long that frame stays on screen
 static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int kmin, int kmax, int fixed, int slow) {
     const double hold0 = FSTEP_HOLD0 * (s->per_vsync ? s->per_vsync : 1), hold_max = FSTEP_HOLD_MAX * (s->per_vsync ? s->per_vsync : 1);
+    const double hcap = s->hold_cap > 0 ? s->hold_cap * (s->per_vsync ? s->per_vsync : 1) : hold_max; const int hmul = s->hold_cap > 0 ? 4 : 2;
     const int smax = s->kcap > 0 && s->kcap <= FSTEP_KMAX ? s->kcap : FSTEP_MAX;   // the largest step
     if (kmin < 1) kmin = 1;
     if (kmin > smax) kmin = smax;
@@ -128,7 +132,7 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
         int want = (int)ceil(cost - (s->up_tol > 0 ? s->up_tol : s->late_tol > 0 ? s->late_tol : 0.05));   // a cost within the tolerance of a hold takes that hold
         if (want < s->k + 1) want = s->k + 1;
         if (want > kmax) want = kmax;
-        if (s->trial || (s->probe == 2 && s->since < hold_max)) { s->failed++; s->trial = 0; s->hold = s->hold * 2 < hold_max ? s->hold * 2 : hold_max; }
+        if (s->trial || (s->probe == 2 && s->since < hold_max)) { s->failed++; s->trial = 0; s->hold = s->hold * hmul < hcap ? s->hold * hmul : hcap; }
         else if (s->probe == 2) s->hold = hold0;   // the probe's run at kmin lasted
         if (held == kmin && s->run >= hold_max) s->cref = s->crun;   // kmin held 8 s at this cost
         s->k = want; s->ups++; s->late_run = s->fit_run = 0; s->since = 0; s->probe = 0;
