@@ -114,6 +114,9 @@ class RawLast(Translated):
 LDG128 = ((LDG[0] & ~(7 << 9)) | 6 << 9, (LDG[1] & ~(0xff << 16)) | 12 << 16)   # LDG.E.128 R12, [R5.64 + UR4]: size bits 73..75 = 6 (B128), R12..R15
 def sts(rb, off): return (STORE[0], (STORE[1] & ~(0xffffffff << 32)) | rb << 32 | off << 40)   # STS.U32 [R9 * 16 + off], Rb
 VEC_HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, const device (_\d+)& \w+((?:, thread uint& _\d+)+), thread spvUnsafeArray<uint, 3>& (_\d+)\)\n\{\n')   # the kept entry's seven words, then gmem_vec
+# Through one pointer the loads are a run (GlobalToStorage.ResolveRawRuns, PR #1752): each calls a resolved helper (base, high, entry, address words) instead
+VEC_RESOLVED = re.compile(r'(?m)^int (_\d+)\((?:thread const int& _\d+, ){5}const device _\d+& \w+, (?:thread uint& _\d+, )?thread spvUnsafeArray<uint, 3>& (_\d+)(?:, thread uint& _\d+)?\)\n\{\n')
+RESOLVED = re.compile(r'(?m)^int (_\d+)\((?:thread const int& _\d+, ){5}const device _\d+& \w+, thread uint& _\d+\)\n\{\n')
 
 
 @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
@@ -197,11 +200,14 @@ class RawVectorPair(Translated):
 
     def test_a_word_of_the_next_load_is_not_read_from_this_ones_vector(self):
         msl = self.msl()
-        vec, scalar = VEC_HELPER.search(msl), HELPER.search(msl)
-        self.assertTrue(vec, msl[:3000])
         main = msl[msl.index('kernel void main0'):]
+        per_access = VEC_HELPER.search(msl)
+        vec = per_access or VEC_RESOLVED.search(msl)
+        self.assertTrue(vec, msl[:3000])
+        out = vec.group(4) if per_access else vec.group(2)   # the vector call's gmem_vec
+        scalar = HELPER.search(msl) if per_access else RESOLVED.search(msl)
         self.assertEqual(len(re.findall(vec.group(1) + r'\(', main)), 1, main[:3000])
-        self.assertNotRegex(main, re.escape(vec.group(4)) + r'\[\d\]', 'a word was read from the vector call\'s gmem_vec')
+        self.assertNotRegex(main, re.escape(out) + r'\[\d\]', 'a word was read from the vector call\'s gmem_vec')
         self.assertTrue(scalar and len(re.findall(scalar.group(1) + r'\(', main)) == 1, 'the second load\'s word 2 has no lookup of its own:\n' + main[:3000])
 
 if __name__ == '__main__':
