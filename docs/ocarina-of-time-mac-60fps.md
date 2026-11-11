@@ -8,11 +8,15 @@ It contains no game files. You build the app from your own dump of the game, exa
 
 Measured on a MacBook Pro with an M3 Pro (14-core GPU, 18 GB), fullscreen, full resolution, MetalFX upscale, the settings below:
 
-| Area | Before this work (uncapped, window) | This branch |
+| Area | Before this work (uncapped, window) | This branch (fullscreen, 60 fps setting) |
 |---|---|---|
-| Kokiri village (the heaviest area tested) | 37.5 fps, GPU 22.4 ms, 92 frames over 40 ms per 96 s walk | 58.5 fps, 98 % of frames in the 60 fps slot, none over 40 ms |
-| Hyrule Field | 42 fps, GPU 20.3 ms | 57-60 fps, GPU 12.6 ms |
-| Link's house, Zora's Domain, Water Temple, Jabu-Jabu, Kakariko, castle courtyard | not all measured | 57-60 fps |
+| Kokiri village (the heaviest area tested) | 37.5 fps, GPU 22.4 ms, 92 frames over 40 ms per 96 s walk | 56-58 fps, 91-97 % of frames in the 60 fps slot, none over 40 ms |
+| Hyrule Field | 42 fps, GPU 20.3 ms | 59.8 fps, 99 % of frames at 60 |
+| Link's house | not measured | 59.8 fps, 100 % |
+| Kakariko | not measured | 59.9 fps, 100 % |
+| Hyrule Castle courtyard | not measured | 57.7 fps, 89 % |
+
+In a window (slower, see below) Zora's Domain, the Water Temple and Jabu-Jabu ran at 59.5-59.8 fps and Gerudo at 56.
 
 In a window the picture is composited by the window server, which costs about 1.4 ms of GPU a frame here: the village runs about 54 fps windowed. Play fullscreen.
 
@@ -25,6 +29,7 @@ Host (Metal renderer and frame pacing), in the order of their effect:
 - **Event gate** (`DM_NVN_EVENT_GATE=1`). Each frame the game queues its second large command list behind a wait for an event that its CPU signals once the first list's fence has passed. The host used to translate that list only when the wait was satisfied, and the GPU sat idle about 2.6 ms of every frame meanwhile. The wait is now put on the Metal queue itself (`waitForEvent`), and the commands behind it are translated and committed ahead of time; a watcher thread opens the gate within 50 µs of the game's signal. Only events that no command list ever signals, and whose waits were seen to block and pass 30 times within 40 ms, are gated; a gate that is not opened within 100 ms is forced open, that event is never gated again, and three forced gates turn the feature off for the run.
 - **Pool-table buffers are reused** (96 spares instead of 16). The game patches 10-15 pool tables a frame; with 16 spares about four new 312 KB buffers were made every frame, each a residency-set add and remove. This removed most of the frames whose GPU time doubled (75 → 13 per walk).
 - **MetalFX takes the upscale of `agl_ndsr_vr` again** (`DM_UPSCALER=metalfx`). Without it the game's own temporal upscaler ran every frame (about 1.6 ms of GPU) and ghosted the player character while turning.
+- **The 60 fps hold stays put** (ticks mode). Three things kept a scene that runs at 57 fps at 40 instead: three slightly late frames in a row moved the hold up; at the 40 fps hold the GPU idles a third of each frame, macOS lowers its clock (1380 → about 1200 MHz) and the same frames then take 21.8 ms instead of 15.5; and the way back asked for a cost under 14.2 ms. Now the hold moves up only when 16 of the last 24 frames were late (`DM_FPS_STICKY`), a frame fits the shorter hold within 1.7 ms of it, and the GPU clock keeper has a mode that runs only while the game is held below its target (`DM_GPU_KEEP=hold`). Kokiri village in fullscreen: 44 → 56-58 fps.
 - **Frame step in ticks of 1/120 s for 60 fps** (`DM_FPS_TARGET=60` with `DM_FPS_TICKS=1`): on a 120 Hz screen a scene that cannot hold 60 runs at an even 40 before it falls to 30, and the game steps by the ticks, so its speed is right at every rate. Late-frame tolerance of 3.3 ms at every hold (`DM_FPS_LATE_TICKS`), and failed attempts at a shorter hold back off to once a minute, so a scene that holds 40 is not probed back to 60 every few seconds.
 - `DM_FPS_TARGET=40` (hold 3 ticks), inherited from the base of this branch.
 - A frame timeline trace (`DM_NVN_SEQ=<frame>`): the game's submits, fences and waits, the host's commits and every command buffer's GPU start and end for four frames. This is what found the idle GPU time.
@@ -33,7 +38,9 @@ Shader chain (needs the shader library rebuilt, which the packing script does): 
 
 Taken from other people's work, with thanks: upstream pull requests #1952 (compute hoist, AdyaGMD), #2226 and #2030 (humanperzeus), #2193 (Know-It-All-Brother), the clock keeper of #1847 (seedds, off here), the FeReuss/nxnative-oot fork (float add, border corrections, barrier bits, render-scale stub) and the cheemu/kid-with-sword-remake fork (raw lookup cache). Their commits keep their authors.
 
-Tried and not kept as defaults, because they gave nothing on this machine: `DM_NVN_TBDR=1` (pass merging), the compute hoist (`DM_NVN_CS_HOIST`, set to 0 below), smaller or no segment cuts without the gate, and the GPU clock keeper (`DM_GPU_KEEP`, set to 0 below: macOS kept the GPU clock at its top here anyway, and the keeper's own work cost up to 1 ms a frame).
+Also taken from upstream after the base: `1d090a66` (uniform slots bounded at 256-byte multiples: white streaks and one-frame dropouts), `6a6a018d` (no stand-in pipelines for predicted keys whose base is made), and the open pull requests #2260 (texture views cached by Metal texture) and #2263 (partial texture re-uploads). #2260's `enc_thread on` for this game is not taken: the event gate does not run with the encode thread.
+
+Tried and not kept as defaults, because they gave nothing on this machine: `DM_NVN_TBDR=1` (pass merging), the compute hoist (`DM_NVN_CS_HOIST`, set to 0 below), smaller or no segment cuts without the gate, and the GPU clock keeper at full or automatic duty (its own work costs up to 1 ms a frame while the game is at its shortest hold; `hold` mode avoids that).
 
 ## Build it with your own copy of the game
 
@@ -62,7 +69,7 @@ DM_FPS_TICKS=1
 DM_NVN_EVENT_GATE=1
 DM_NVN_CUT=0
 DM_NVN_CS_HOIST=0
-DM_GPU_KEEP=0
+DM_GPU_KEEP=hold
 DM_FOCUS_KEEP=1
 DM_METAL_HUD=1
 ```
@@ -84,7 +91,8 @@ Useful numbers to report with a result: the Mac and its GPU core count, fullscre
 
 ## Known limits
 
-- A locked 60 in the heaviest scenes needs about 16.7 ms of GPU work a frame at this resolution; the M3 Pro's 14-core GPU is at 15.7-15.9 ms in the Kokiri village in fullscreen, so about 2 % of frames there still miss their slot. Smaller GPUs will not hold 60 there.
+- The heaviest scenes are on the edge on this GPU: the Kokiri village and the castle courtyard run 14.8-15.0 ms of GPU work a frame in fullscreen, and 3-10 % of their frames miss the 16.7 ms slot and show one refresh (8.3 ms) late. Smaller GPUs will not hold 60 there; the frame step then settles at an even 40.
+- Anything else that uses the GPU or the video encoder while you play (screen recording, screen sharing, AirPlay) costs frames: with the screen being streamed, identical runs here varied between 41 and 56 fps.
 - The event gate changes when part of each frame is translated. It was run through nine areas and a 4,800-frame video check per configuration without a picture fault, a forced gate or a crash, but it is new: `DM_NVN_EVENT_GATE=0` (or deleting the line) restores the old behaviour.
 - Tested on one Mac only. Macs with 16 GB are tight: the game's footprint is about 11 GB.
 - The first start after a build prepares pipelines for several minutes behind a progress screen.
