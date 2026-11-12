@@ -333,8 +333,14 @@ void nvn_queue_wait_sync(queue_t *q,const sync_t *s) {
     pthread_once(&nq_once,nq_start); nq_job *j=calloc(1,sizeof *j); if(!j) die("queue wait allocation failed"); j->receipt=nq_new();
     pthread_mutex_lock(&nq_mu); nq_snapshot_sync(nq_append(j,NQ_SYNC),s); nq_enqueue(nq_get(q),j); pthread_mutex_unlock(&nq_mu);
 }
+// DM_NVN_FINISH_PRESENT=0: nvnQueueFinish waits for the queue's commands to finish on the GPU and not for its last present to reach the screen as well. Ocarina of Time's
+// autosave calls QueueFinish on its SceneLowPriority thread while holding the mutex its Presentation Thread needs (DM_HITCH_DUMP: that thread in mtl_present_wait 28 ms after the
+// last present, the Presentation Thread on the mutex, the main thread on the presentation's condition variable): the wait for the present, which the present thread shows at its
+// slot one or two refreshes later, held the next frame for that long, a frame of 36-45 ms at every autosave (45 in an hour of play). The next acquire of a window texture still
+// waits for that texture's own present (nvnWindowAcquireTexture), and a presented texture stays pinned, so nothing the present reads can change under it
+static int nq_finish_present(void) { static int v=-1; if(v<0) { const char *e=getenv("DM_NVN_FINISH_PRESENT"); v=!(e && !strcmp(e,"0")); if(!v) LOG("[nvn] DM_NVN_FINISH_PRESENT=0: nvnQueueFinish does not wait for the queue's last present"); } return v; }
 void nvn_queue_finish(queue_t *q) { sync_t s={0}; nvn_queue_fence(q,&s); nvn_sync_wait(&s,UINT64_MAX); nvn_sync_release(&s);
     pthread_mutex_lock(&nq_mu); uint64_t present=nq_get(q)->present; pthread_mutex_unlock(&nq_mu);
-    if(present) mtl_present_wait(present);
+    if(present && nq_finish_present()) mtl_present_wait(present);
 }
 void nvn_queue_forget(queue_t *q) { nvn_queue_finish(q); pthread_mutex_lock(&nq_mu); nq_queue **p=&nq_queues; while(*p && (*p)->serial!=q->serial) p=&(*p)->next; if(*p) { nq_queue *old=*p; *p=old->next; nq_put(old->tail); free(old); } pthread_mutex_unlock(&nq_mu); }
