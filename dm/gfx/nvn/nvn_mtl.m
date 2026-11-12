@@ -7198,6 +7198,15 @@ static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     d.lodMinClamp = p.lod_min < 0 ? 0 : p.lod_min; d.lodMaxClamp = p.lod_max;
     d.lodBias = p.lod_bias < -16 ? -16 : p.lod_bias > 15.99f ? 15.99f : p.lod_bias;   // SetLodBias: Maxwell's sampler bias, Metal 26's range [-16, 15.99]
     d.maxAnisotropy = p.aniso < 1 ? 1 : p.aniso > 16 ? 16 : (NSUInteger)p.aniso;
+    {   // Texture filtering (DM_NVN_ANISO=<0 | 2..16>, the settings window's Texture filtering; unset, the profile's tex_aniso): at least that much anisotropy on the samplers that filter a
+        // mip chain linearly, so a surface seen at a shallow angle keeps its detail; the game's own value stays when it is higher. Not on nearest, unmipped, comparison or reduction
+        // samplers (lookup tables, shadow maps, depth pyramids), whose results must not change. Ocarina of Time asks for 1x and 2x only
+        static int want = -1; static int n_up, n_all; static unsigned seen;
+        if (want < 0) { const char *e = getenv("DM_NVN_ANISO"); want = e ? atoi(e) : DM_GAME_TEX_ANISO; if (want < 2) want = 0; if (want > 16) want = 16; }
+        int own = (int)d.maxAnisotropy; ++n_all; if (own >= 1 && own <= 16) seen |= 1u << own;
+        if (want > own && p.magf && d.minFilter == MTLSamplerMinMagFilterLinear && d.mipFilter != MTLSamplerMipFilterNotMipmapped && !p.cmp_mode && !p.reduction) { d.maxAnisotropy = want; ++n_up; }
+        if (want && (n_all == 50 || n_all % 2000 == 0)) MLOG("texture filtering %dx (DM_NVN_ANISO): %d of %d samplers raised so far; the game's own values seen (bit n = n x): 0x%x", want, n_up, n_all, seen);
+    }
     if (p.cmp_mode) d.compareFunction = (MTLCompareFunction)(p.cmp_func - 1);
     // Reduction (NVN 1 min / 2 max): the minimum or maximum of the texels a filtered sample covers, per channel (Metal 26). Pokémon Legends: Z-A builds its depth pyramid with a min sampler
     // (151607c7a92386cc reads the level above at an explicit LOD) and tests occlusion boxes against it; averaged, the pyramid is nearer than the scene at depth edges. Metal ignores the reduction

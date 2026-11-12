@@ -116,6 +116,7 @@ SWITCH_BINDING = [
      'why': 'the replay could find such draws itself, at the cost of a pass split each'}),
     ('enc_thread', '', {'what': 'Metal encoding on its own thread on the Mac', 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',
      'why': f'what iOS does for every game: {DEFAULT_SOON}'}),
+    ('tex_aniso', '', {'what': 'texture filtering above the game\'s own', 'now': 'game', 'goal': 'game', 'purpose': 'rendering', 'why': 'a picture choice the game was tested with; the player changes it in the Mac settings window'}),
     ('present_snap', '', {'what': 'present snapshots', 'now': 'game', 'goal': 'host', 'purpose': 'rendering', 'why': f'a setting the game was tested with: {DEFAULT_SOON}'}),
     ('pso_mtl4', '', {'what': 'MTL4Compiler pipelines on iOS', 'now': 'game', 'goal': 'host', 'purpose': 'rendering', 'why': f'a setting the game was tested with on an iPhone: {DEFAULT_SOON}'}),
     ('screen_aspect', '', {'what': 'a picture of a taller screen\'s own shape (DM_SCREEN_ASPECT)', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',

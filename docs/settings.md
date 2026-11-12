@@ -3,7 +3,7 @@
 The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Sharpening](#sharpening), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
+- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Sharpening](#sharpening), [Texture filtering](#texture-filtering), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
@@ -67,6 +67,14 @@ On the Mac. **Off**, the default, shows the picture as it is scaled to the scree
 - **When to change it:** when the picture looks soft because the game renders well below the screen's resolution. Ocarina of Time draws 3D at 1536x864 and reaches a 3024-wide screen through three scalings; the pattern on Link's hat is a good place to judge it.
 - **Cost:** about 0.1 ms of GPU time a frame on an M3 Pro at 3024x1701 (the frame's GPU time 15.74 to 15.79 ms). **Strong** makes grass and fog look grainy.
 - **In `env.txt`:** `DM_PRESENT_SHARPEN=<0-1>` (Light 0.3, Medium 0.5, Strong 0.75).
+
+### Texture filtering
+
+On the Mac, for games that draw through NVN. **Game's own** leaves every texture filtered as the game asks. **4x**, **8x** and **16x** raise the anisotropic filtering of the game's surface textures to at least that, so the ground, a path or a wall stays crisp where you look along it instead of blurring with distance. The default is the value the game was tested with: 16x for Ocarina of Time, which asks for 1x and 2x itself, and the game's own elsewhere.
+
+- **When to change it:** lower it if a slower GPU needs the time back; raise it when distant ground looks smeared.
+- **Cost:** none that could be measured on an M3 Pro with Ocarina of Time at 16x (the frame's GPU time 12.0 ms either way at Hyrule Castle, one run each). A slower GPU may pay more.
+- **In `env.txt`:** `DM_NVN_ANISO=<0 | 2-16>`.
 
 ### Game's upscaler
 

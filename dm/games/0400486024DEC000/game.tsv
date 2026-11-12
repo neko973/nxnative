@@ -46,6 +46,9 @@ fps_target	60
 render_cond	on
 gpu_timestamps	segment
 draw_barriers	game
+# Texture filtering: the game asks for 1x and 2x anisotropy only, so ground and walls blur where the camera looks along them. 16x on its mipmapped linear samplers cost nothing measurable on an
+# M3 Pro (GPU p50 12.0 ms either way at Hyrule Castle; 13.4 against 13.9-14.5 ms at a heavier save, one run each); the Mac settings window's Texture filtering changes it
+tex_aniso	16
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on
