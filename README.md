@@ -11,6 +11,16 @@
 > ./install-ocarina-mac.sh /path/to/your/OcarinaOfTime.nup
 > ```
 >
+> **Update to the newest version** (also the fix when the script stops with `the shader translator does not run (exit code -11)`):
+>
+> ```
+> cd nxnative
+> git pull
+> ./install-ocarina-mac.sh /path/to/your/OcarinaOfTime.nup
+> ```
+>
+> If you downloaded a ZIP instead of using `git clone`, there is nothing to pull: run the three install commands above in Terminal. The work folder beside your dump is kept and reused.
+>
 > The script checks the Mac, installs what is missing (it asks first), builds the app (1 h 15 min to 1 h 45 min) and tells you where it put it. The tested settings are built in, so there is nothing to configure. `./install-ocarina-mac.sh --check` only checks the Mac. If it stops, it says why and what to do; details, results and troubleshooting: [docs/ocarina-of-time-mac-60fps.md](docs/ocarina-of-time-mac-60fps.md).
 
 

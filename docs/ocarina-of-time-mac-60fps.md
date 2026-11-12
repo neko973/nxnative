@@ -72,6 +72,27 @@ This was checked from a fresh clone of this branch on 2026-11-11: the three comm
 
 The first start of the app prepares pipelines for several minutes behind a progress screen; later starts take seconds.
 
+### Update to the newest version
+
+```
+cd nxnative
+git pull
+./install-ocarina-mac.sh /path/to/your/OcarinaOfTime.nup
+```
+
+Finished steps are reused: the unpacked game is kept in the work folder beside your dump (`0400486024DEC000_build`), so leave that folder and the dump where they are. Shaders are rebuilt when the update changed the shader tools, as the one of 2026-11-12 did.
+
+If your folder came from GitHub's "Download ZIP" (it is then named `nxnative-ocarina-mac-60fps` and `git pull` says `not a git repository`), get a clone instead, which can be updated from then on, and run the script from it:
+
+```
+cd ~
+git clone -b ocarina-mac-60fps https://github.com/neko973/nxnative.git
+cd nxnative
+./install-ocarina-mac.sh /path/to/your/OcarinaOfTime.nup
+```
+
+The old ZIP folder can go to the Trash afterwards.
+
 ### If it stops
 
 The script says what is missing and the command that fixes it. The cases seen so far:
@@ -85,6 +106,7 @@ The script says what is missing and the command that fixes it. The cases seen so
 | `Capstone 6 ... is unsupported` | The same: the script's own Python folder has Capstone 5 |
 | files `whose bytes do not start as their names promise` | Your dump has damaged files. Dump again, or add `--allow-damaged` to pack them as they are (three damaged textures did no visible harm here) |
 | `built only with the Metal compiler they were tested with` | The script already passes `--allow-other-metal`; you see this only when you call the packing script yourself with another Xcode |
+| `the shader translator does not run (exit code -11)` | The translator crashed when it was started (signal 11); your copy is not damaged. Seen on macOS 26.6.2 with the translator this branch had until 2026-11-12, which was built on macOS 27. The branch now has one built with Microsoft's .NET: update as described above and run the script again. That fix is not yet confirmed on macOS 26. If it stops the same way after the update, run `dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate --source-sha; echo "exit $?"` in the `nxnative` folder, then `ls -t ~/Library/Logs/DiagnosticReports/dmsh_xlate* \| head -1`, and report the output and the first 60 lines of that file |
 | the disk fills up | Free space and run the same command again: finished steps are reused |
 | `this Python ... is an Intel one running under Rosetta` | Turn off "Open using Rosetta" for the Terminal app, or use `/opt/homebrew/bin/python3` |
 
