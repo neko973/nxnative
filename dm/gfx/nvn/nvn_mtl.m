@@ -12313,11 +12313,15 @@ static int defer_on(void) {
     if (!g_defer_env_ab) return (tbdr_on() || defer_load_on()) && !g_defer_env_off;
     if (g_defer_ab < 0) { g_defer_ab = 0; g_defer_ab_on = 0; }
     return (tbdr_on() || defer_load_on()) && (g_defer_ab || g_defer_ab_on); }
+// The registration is copied under g_rmu: the game's thread grows the table (mtl_reg_tex: realloc) while the replay thread looks a handle up here. Read without the lock, a
+// lookup during a move read freed memory (SIGSEGV in defer_handle_sub at the title screen, once in about 150 runs with DM_NVN_DEFER_LOAD=1, which runs this outside TBDR mode)
 static int defer_handle_sub(uint64_t h, const p_set_rt *r, int k, int cover) {
-    int tid = (int)(h & 0xfffff); if (!tid || tid >= g_ntreg || !g_treg[tid].ok) return 0;
-    uint64_t ser; int lv, sl; rt_sub(r, k, &ser, &lv, &sl); if (!ser || g_treg[tid].t.serial != ser) return 0;
-    if (!g_treg[tid].has_v || !g_treg[tid].v.set_levels) return cover;
-    view_t v = g_treg[tid].v; int n = v.nlevels > 0 ? v.nlevels : 1;
+    int tid = (int)(h & 0xfffff); if (!tid) return 0;
+    os_unfair_lock_lock(&g_rmu); int ok = tid < g_ntreg && g_treg[tid].ok; uint64_t tser = ok ? g_treg[tid].t.serial : 0; int has_v = ok && g_treg[tid].has_v; view_t v = has_v ? g_treg[tid].v : (view_t){0}; os_unfair_lock_unlock(&g_rmu);
+    if (!ok) return 0;
+    uint64_t ser; int lv, sl; rt_sub(r, k, &ser, &lv, &sl); if (!ser || tser != ser) return 0;
+    if (!has_v || !v.set_levels) return cover;
+    int n = v.nlevels > 0 ? v.nlevels : 1;
     return lv >= v.base_level && lv < v.base_level + n && (!v.set_layers || (sl >= v.min_layer && sl < v.min_layer + (v.nlayers > 0 ? v.nlayers : 1)));
 }
 static int defer_prog_hits(const prog_t *pg, uint64_t tex[6][NTEX], uint64_t img[6][32], const p_set_rt *r, int color_only, int cover) {
