@@ -1,6 +1,8 @@
 #!/bin/sh
 # Builds the repository's two C# tools as native executables (NativeAOT), universal (arm64 and x86_64) as spirv-cross is, so running them needs no .NET (GitHub issue #1853);
 # building them needs the .NET SDK 10:
+# (Microsoft's SDK, as the cask below or dotnet-sdk-<version>-osx-arm64.tar.gz installs it: its NativeAOT runtime is the portable one. Homebrew's `dotnet` formula builds its own on the
+#  current macOS; a translator linked from it on macOS 27 was reported to die of SIGSEGV at start on macOS 26.6)
 #   dmsh_xlate → dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate   the shader translator (Ryujinx's shader library, dm/third_party/ryujinx), part of the translation chain
 #   nx_extract → dm/tools/nx_extract_bin/nx_extract        NSP extraction (LibHac)
 # Each embeds its own sources and prints their digest with --source-sha: tool_lock.py refuses a translator, and the NSP script an nx_extract, not built from the sources in the repository.
