@@ -3,7 +3,7 @@
 The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Sharpening](#sharpening), [Texture filtering](#texture-filtering), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
+- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Sharpening](#sharpening), [Texture filtering](#texture-filtering), [Texture size](#texture-size), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
@@ -75,6 +75,14 @@ On the Mac, for games that draw through NVN. **Game's own** leaves every texture
 - **When to change it:** lower it if a slower GPU needs the time back; raise it when distant ground looks smeared.
 - **Cost:** none that could be measured on an M3 Pro with Ocarina of Time at 16x (the frame's GPU time 12.0 ms either way at Hyrule Castle, one run each). A slower GPU may pay more.
 - **In `env.txt`:** `DM_NVN_ANISO=<0 | 2-16>`.
+
+### Texture size
+
+On the Mac, for games that draw through NVN. **Full** keeps every texture as the game ships it. **Smaller** leaves out the largest level of the game's big textures (512 pixels a side and more), so each takes a quarter of the memory: surfaces look the same from a few steps away and softer up close. **Automatic**, the default, picks Smaller on a Mac whose graphics memory is under 6 GB, which is a Mac with 8 GB, and Full on every other.
+
+- **When to change it:** choose **Smaller** on a 16 GB Mac if the game stutters while it loads an area or macOS reports memory pressure.
+- **Cost:** softer textures in close views: the grain of a stone floor at Link's feet is gone, the same floor a few steps away looks the same. In Ocarina of Time on an 18 GB Mac it took 633 textures and 337 MB (the game's memory 11.7 to 11.3 GB) at the same frame rate.
+- **In `env.txt`:** `DM_NVN_TEX_DROP_MIP=<0 | 1>`.
 
 ### Game's upscaler
 

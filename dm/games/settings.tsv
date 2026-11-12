@@ -21,6 +21,7 @@ DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		le
 DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.
 DM_PRESENT_SHARPEN	choice	0=Off,0.3=Light,0.5=Medium,0.75=Strong	0	platform:mac	Game	Sharpening	Makes fine detail crisper. Strong can look grainy.	needs=DM_PRESENT_UPSCALE=off
 DM_NVN_ANISO	choice	0=Game's own,4=4x,8=8x,16=16x	DM_GAME_TEX_ANISO	gfxapi:nvn&platform:mac	Game	Texture filtering	Keeps ground and walls crisp where you look along them. Higher values can cost a little GPU time.
+DM_NVN_TEX_DROP_MIP	choice	auto=Automatic,0=Full,1=Smaller	auto	gfxapi:nvn&platform:mac	Game	Texture size	Smaller halves the largest textures: about half a gigabyte less memory, softer surfaces up close. Automatic picks Smaller on a Mac with 8 GB.
 DM_UPSCALER	choice	game=Game's own,metalfx=MetalFX	game	DM_GAME_UPSCALER_N!=0	Game	Game's upscaler
 DM_LANG	choice	languages	build:DM_LANG	languages>1	Game	Game language		level=basic
 DM_FULLSCREEN	choice	0=Window,1=Fullscreen	0	platform:mac	Game	Display mode		level=basic

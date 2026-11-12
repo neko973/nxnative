@@ -15,6 +15,7 @@ void bf_want_note(const char *key);
 // Memory pool: [mem, mem+size) is expanded outward to page boundaries to build a zero-copy buffer; look up the buffer and offset by GPU address (= CPU address)
 void mtl_pool_add(const void *mem, uint64_t size);
 void mtl_pool_addressed(const void *mem, uint64_t size);   // the game holds a GPU address in this range, so raw global memory may reach it
+int mtl_pool_code_out(const void *mem, uint64_t size);   // a shader-code pool's own address was asked for: 1 = it stays out of the raw pool table for that (DM_NVN_CODE_POOLS=1: 0, it goes in as before)
 void mtl_pool_del(const void *mem);
 // memory pool Finalize: evict the textures built on this pool (pool object address) from the storage-sharing table
 void mtl_alias_drop_pool(const void *pool);

@@ -77,7 +77,7 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
         self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_PICTURE_FIT'})
         self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
-        self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_SW2', 'DM_PRESENT_SHARPEN', 'DM_NVN_ANISO'})   # texture filtering (nvn_mtl.m's samplers, measured on the Mac only); the Mac window's Display mode (front_mac.m reads 1 or 0); Switch 2 controllers (pad_switch2_apple.m, wired on the Mac only); the present pass's sharpening (measured on the Mac only)
+        self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_SW2', 'DM_PRESENT_SHARPEN', 'DM_NVN_ANISO', 'DM_NVN_TEX_DROP_MIP'})   # texture filtering and texture size (nvn_mtl.m's samplers and uploads; the iPhone follows its device rule); the Mac window's Display mode (front_mac.m reads 1 or 0); Switch 2 controllers (pad_switch2_apple.m, wired on the Mac only); the present pass's sharpening (measured on the Mac only)
         s = mac['DM_FULLSCREEN']
         self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', '0', [['0', 'Window'], ['1', 'Fullscreen']], 'basic'))
 

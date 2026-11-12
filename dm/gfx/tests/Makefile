@@ -277,7 +277,7 @@ t_upload_slots: t_upload_slots.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_slots.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_upload_slots
 check_t_upload_slots: t_upload_slots
-	MTL_DEBUG_LAYER=1 ./t_upload_slots
+	DM_NVN_UPLOAD_REUSE=1 MTL_DEBUG_LAYER=1 ./t_upload_slots
 	DM_NVN_UPLOAD_REUSE=0 MTL_DEBUG_LAYER=1 ./t_upload_slots
 t_sbw: t_sbw.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_sbw.m $(MTL_T_SRC) $(FW)
@@ -622,3 +622,7 @@ check_t_pool_standin: t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_POOL_STANDIN=0 ./t_pool_standin
+
+t_tex_drop_mip: t_tex_drop_mip.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tex_drop_mip.m $(MTL_T_SRC) $(FW)
+check_t_tex_drop_mip: RUN_ENV = MTL_DEBUG_LAYER=1
