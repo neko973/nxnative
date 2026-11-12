@@ -64,6 +64,8 @@ cd nxnative
 
 The script checks the Mac, installs what is missing after asking (the Homebrew packages `zstd` and `glslang`, a Python 3.12 or later if there is none, the Metal compiler; the Python modules `lz4`, `capstone` 5, `fonttools` and `zbic` go into a folder of their own, `.oot-venv`), builds the app and prints where it put it: next to your dump, named after the game. The build takes 1 h 15 min to 1 h 45 min on an M3 Pro (50-65 minutes of shader compiling, 12-27 of pipeline prebuild). The settings below are built into the app (`dm/games/0400486024DEC000/mac-60fps.env`), so there is nothing to set up. `./install-ocarina-mac.sh --check` only checks the Mac and builds nothing.
 
+This was checked from a fresh clone of this branch on 2026-11-11: the three commands above gave a working app in 1 h 31 min (unpack 1.5 min, shaders 57 min, pipeline archive 27 min, packing and signing 3.5 min), with all 42,848 shaders built and the settings and the 43,900-row pipeline list inside the app. The work folder peaks at about 53 GB; once the app runs, deleting `shader/cache/cas.db` in it gives 10 GB back, and the whole work folder can go if you do not plan to rebuild.
+
 The first start of the app prepares pipelines for several minutes behind a progress screen; later starts take seconds.
 
 ### If it stops

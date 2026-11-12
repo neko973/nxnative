@@ -167,6 +167,6 @@ cat <<EOF
   dm/games/$TITLE/mac-60fps.env.
 - Saves are in ~/Library/Application Support/nxnative/$TITLE/save and are kept when you rebuild.
 - The build's work folder (next to your dump, ${TITLE}_build, or the --work-dir one) can be deleted once the app runs;
-  keeping it makes a later rebuild much faster.
+  keeping it makes a later rebuild much faster. Its shader/cache/cas.db alone is 10 GB you can delete at any time.
 - Something wrong? The game's log is ~/Library/Logs/nxnative/$TITLE.log; the guide is docs/ocarina-of-time-mac-60fps.md.
 EOF
