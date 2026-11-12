@@ -839,14 +839,15 @@ NVN(nvnCommandBufferSaveZCullData, void, NVNcommandBuffer *c, NVNbufferAddress a
 // depth-stencil state still does. The host does no ZCull, so there is nothing to set (Donkey Kong Bananza: EQUAL, 0xff)
 NVN_NOPROTO(nvnCommandBufferSetStencilCullCriteria, void, NVNcommandBuffer *c, int func, int ref) { (void)c; (void)func; (void)ref; }
 static _Atomic uint64_t g_sync_ns;
+static _Atomic uint64_t g_fs_sync_ns;   // the same waits for the frame step's cost (fstep_tick takes them once per frame)
 NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     const sync_t *o = (const sync_t *)s;
     if (!o->fenced) return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
-    if(o->fenced==3) { if(nvn_sync_wait(o,0)) { dm_seq("syncwait-already",0,0); return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED; } dm_seq("syncwait>",0,0); uint64_t t0=now_ns(); int ok=nvn_sync_wait(o,timeout); dm_seq("syncwait<",0,(now_ns()-t0)/1000); atomic_fetch_add(&g_sync_ns,now_ns()-t0); return ok?NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED:NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED; }
+    if(o->fenced==3) { if(nvn_sync_wait(o,0)) { dm_seq("syncwait-already",0,0); return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED; } dm_seq("syncwait>",0,0); uint64_t t0=now_ns(); int ok=nvn_sync_wait(o,timeout); dm_seq("syncwait<",0,(now_ns()-t0)/1000); { uint64_t dt=now_ns()-t0; atomic_fetch_add(&g_sync_ns,dt); atomic_fetch_add(&g_fs_sync_ns,dt); } return ok?NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED:NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED; }
     int (*w)(uint64_t, uint64_t) = o->fenced == 2 ? mtl_wait_acq : mtl_wait;
     if (w(o->fence, 0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
     dm_seq("syncwait>", o->fence, mtl_last_fence());
-    uint64_t t0 = now_ns(); int ok = w(o->fence, timeout); atomic_fetch_add(&g_sync_ns, now_ns() - t0);   // the frame's blocked SyncWait time (@sync_ms)
+    uint64_t t0 = now_ns(); int ok = w(o->fence, timeout); { uint64_t dt = now_ns() - t0; atomic_fetch_add(&g_sync_ns, dt); atomic_fetch_add(&g_fs_sync_ns, dt); }   // the frame's blocked SyncWait time (@sync_ms)
     dm_seq("syncwait<", o->fence, (now_ns() - t0) / 1000);
     return ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
 }
@@ -1807,6 +1808,7 @@ void mtl_barrier_stats(uint64_t *skip, uint64_t *full);
 extern uint32_t mtl_present_qos(void);
 static _Atomic uint64_t g_frame;
 static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // Accumulated display-link wait / wait for the present queue to return inside acquire, recorded per frame at present (there can be several acquires within one frame)
+static uint64_t g_fs_pq;   // the first acquire's wait for its texture's present to be taken (below): idle time too, for the frame step's cost
 static uint64_t g_fs_start, g_fs_wait;   // frame step (fstep_tick): when the first acquire after a present returned (the frame's start, 0 = none yet), and its pacing wait
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
 extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
@@ -1840,9 +1842,10 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     g_acq_wait_ns += wait; trow(g_frame, "@late_ms", wait ? (now_ns() - at) / 1e6 : 0);
     // The previous present of this texture has not yet been processed by the present thread (display cannot keep up, a whole swapchain round behind): wait for it to be returned, then hand it to the game to draw
     uint64_t tk = *idx < 4 ? o->ticket[*idx] : 0;
-    if (tk) { uint64_t w0 = now_ns(); nvn_queue_present_wait(tk); nvn_queue_present_release(tk); o->ticket[*idx]=0; g_pq_wait_ns += now_ns() - w0; }
+    uint64_t pq_ns = 0;
+    if (tk) { uint64_t w0 = now_ns(); nvn_queue_present_wait(tk); nvn_queue_present_release(tk); o->ticket[*idx]=0; pq_ns = now_ns() - w0; g_pq_wait_ns += pq_ns; }
     if (s) { nvn_sync_release((sync_t *)s); ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = mtl_last_fence(); }   // The swapchain texture becomes available once the commits before this point have completed (fenced 2: an acquire sync, for the wait ledger)
-    if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; }   // the frame starts when the first acquire after a present returns: on a display-link tick when on time
+    if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; g_fs_pq = pq_ns; }   // the frame starts when the first acquire after a present returns: on a display-link tick when on time
     return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
 }
 // The older API (NVN 53, Super Mario 3D World + Bowser's Fury): the queue waits for the texture on the GPU and no sync object is handed out. The host replays in submission order, so later commands already come after earlier presents; the same as WindowAcquireTexture without a sync object
@@ -2357,7 +2360,16 @@ static void fstep_tick(const win_t *o, int c) {
     uint64_t st = g_fs_start ? g_fs_start : now_ns(), pw = g_fs_wait; g_fs_start = g_fs_wait = 0;
     double shown = prev ? (st - prev) / v : 0, gpu = 0; prev = st;
     for (uint64_t f = g_frame; f-- > 0 && g_frame - f <= 8;) { double g = mtl_gpu_ms(f); if (g >= 0) { gpu = g * 1e6 / v; break; } }
-    double cpu = shown - pw / v, cost = cpu > gpu ? cpu : gpu;
+    double cpu = shown - pw / v;
+    // Ticks mode without present snapshots on the link (Ocarina of Time on the Mac: direct presents): the frame's waiting is not all in the pacing wait. The acquire also waits
+    // for its texture's present to be taken, and the game waits for its sync objects, so the time between starts was all counted as work (frame work p50 24.99 ms of 25.00 at
+    // the 40 fps hold, GPU 11-13 ms). A cost of 3 ticks never fits hold 2 (2.2), so after a burst (GPU 20-27 ms for half a second) only a probe brought 60 fps back: an hour of
+    // play stepped up 17 times and stayed at 40 fps for 89, 17 and 100 s three of them, 5% of the hour. The CPU's cost there is the time between starts without those waits
+    // (the GPU's own time still counts through the max below); DM_FPS_IDLE=0 keeps the pacing wait alone
+    { static int idle_on = -1; if (idle_on < 0) { const char *e = getenv("DM_FPS_IDLE"); idle_on = !(e && !strcmp(e, "0")); }
+      uint64_t idle = atomic_exchange(&g_fs_sync_ns, 0) + g_fs_pq; g_fs_pq = 0;
+      if (idle_on && fs_t120() && !(mtl_snap_on() && mtl_link_active())) { cpu -= idle / v; if (cpu < 0) cpu = 0; } }
+    double cost = cpu > gpu ? cpu : gpu;
     int kmin = fstep_hz() / c, kmax = fps_high() ? 2 : !fstep_hold() ? kmin : fs_t120() ? 4 : kmin >= 2 ? 2 : FSTEP_MAX, k0 = g_fs.k,   // 40 fps: hold 3, or 4 (30) when late   // at 120 fps a late frame must step down whatever fps_hold says: the game steps by the target
          kmin0 = g_fs.kmin, probe0 = g_fs.probe;
     int fixed = dm_fps_state ? (int)__atomic_load_n((uint32_t *)(dm_fps_state + 0x24), __ATOMIC_RELAXED) : 0;
@@ -2390,6 +2402,9 @@ static void fstep_tick(const win_t *o, int c) {
             hist = hist << 1 | (uint32_t)(shown > k + g_fs.late_tol || cost > k + g_fs.late_tol);
             way_run = cost > k + 1.0 ? way_run + 1 : 0;
             g_fs.screen = __builtin_popcount(hist & 0xffffff) >= 16 || way_run >= 3 ? 2 : 1;
+            // Test: DM_FSTEP_KICK=<presents> reports three late frames every so many presents at the shortest hold, the step up a burst causes, to measure how long the hold takes to come back
+            { static int kick = -1; if (kick < 0) { const char *e = getenv("DM_FSTEP_KICK"); kick = e ? atoi(e) : 0; if (kick < 0) kick = 0; }
+              if (kick && k == kmin && o->presents > (uint64_t)kick && o->presents % (uint64_t)kick < 3) g_fs.screen = 2; }
         }
     }
     // A probe's grace lasts while its frames keep getting cheaper (nvn_fstep.h FSTEP_RAMP): macOS raises the GPU clock for the shorter deadline over seconds, not the iPhone's 30 frames
