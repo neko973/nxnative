@@ -711,7 +711,7 @@ void mtl_init(void) {
     g_present_args = [g_dev newArgumentTableWithDescriptor:pad error:&ate];
     if (!g_present_args) MDIE("failed to create the present argument table: %s", ate.localizedDescription.UTF8String);
     for (int i = 0; i < 3; i++) {
-        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
+        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 12 options:MTLResourceStorageModeShared];
         if (!g_present_uv[i]) MDIE("failed to create present UV buffer[%d]", i);
         res_add(g_present_uv[i]);
     }
@@ -16109,6 +16109,17 @@ int mtl_display_hz(void) {
 static _Atomic uint64_t g_present_stall_ns;   // For unit tests: an extra pause before each present on the present thread (simulating a drawable that stays unavailable)
 static CAMetalLayer *g_present_layer_resident;
 void mtl_present_test_stall(uint64_t ns) { g_present_stall_ns = ns; }
+// DM_PRESENT_SHARPEN=<0-1>: the bilinear present pass sharpens what it draws (present.metal fs_sharp), 0 or unset = off. Ocarina of Time's picture reaches the screen through
+// three scalings (1536x864 to 2048x1152 by MetalFX, to 2560x1440 by the game, to the screen here), and the last two are bilinear
+static id<MTLRenderPipelineState> g_blit_pso_sharp;
+static float present_sharpen(void) {
+    static float v = -1; static int live = -1;
+    if (live < 0) { const char *l = getenv("DM_PRESENT_SHARPEN_LIVE"); live = l && !strcmp(l, "1"); }   // test: read at every present, so DM_CTL's "env DM_PRESENT_SHARPEN=<x>" changes it in a running game
+    if (live) { const char *e = getenv("DM_PRESENT_SHARPEN"); float x = e ? (float)atof(e) : 0; return x > 1 ? 1 : x > 0 ? x : 0; }
+    if (v < 0) { const char *e = getenv("DM_PRESENT_SHARPEN"); v = e ? (float)atof(e) : 0; if (!(v > 0)) v = 0; if (v > 1) v = 1;
+        if (v > 0) MLOG("present sharpening (DM_PRESENT_SHARPEN): strength %.2f, in the bilinear present pass", v); }
+    return v;
+}
 static void present_pipeline(MTLPixelFormat format) {
     if (!g_blit_pso || g_blit_fmt != format) {
         NSError *e = nil;
@@ -16119,6 +16130,9 @@ static void present_pipeline(MTLPixelFormat format) {
         pd.colorAttachments[0].pixelFormat = format;
         g_blit_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
         if (!g_blit_pso) MDIE("present pipeline failed %s", e.localizedDescription.UTF8String);
+        g_blit_pso_sharp = nil;
+        if (present_sharpen() > 0 || getenv("DM_PRESENT_SHARPEN_LIVE")) { pd.fragmentFunction = [lib newFunctionWithName:@"fs_sharp"]; g_blit_pso_sharp = pd.fragmentFunction ? [g_dev newRenderPipelineStateWithDescriptor:pd error:&e] : nil;
+            if (!g_blit_pso_sharp) MLOG("[RED] the sharpening present pipeline failed (%s): presenting without it", e ? e.localizedDescription.UTF8String : "no fs_sharp in the library"); }
         g_blit_fmt = format;
         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear; sd.supportArgumentBuffers = YES;
         g_blit_samp = [g_dev newSamplerStateWithDescriptor:sd];
@@ -16472,7 +16486,9 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     uv[4] = (cx + 0.5f) / tw; uv[5] = (cy + 0.5f) / th; uv[6] = (cx + cw - 0.5f) / tw; uv[7] = (cy + ch - 0.5f) / th;
     if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
     [g_present_args setAddress:uvb.gpuAddress atIndex:0];
-    [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
+    float sv = present_sharpen(); int sharp = !up && sv > 0 && g_blit_pso_sharp && uvb.length >= sizeof(float) * 12;
+    if (sharp) { uv[8] = sv; uv[9] = 1.0f / tw; uv[10] = 1.0f / th; uv[11] = 0; }
+    [en setViewport:vp]; [en setRenderPipelineState:sharp ? g_blit_pso_sharp : g_blit_pso];
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     m4_end(en);
     return up ? PRESENT_METALFX : PRESENT_STANDARD;
@@ -16481,7 +16497,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
 // returns whether it was submitted. Completion reports the encoding kind, or PRESENT_FAILED on a GPU error. Resources remain resident and retained until GPU completion.
 static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, void (^done)(int)) {
     id<MTL4CommandAllocator> al = [g_dev newCommandAllocator]; id<MTL4CommandBuffer> cb = [g_dev newCommandBuffer];
-    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 12 options:MTLResourceStorageModeShared];
     if (!al || !cb || !uvb) { MLOG("[RED] offscreen present: no command allocator or buffer"); return 0; }
     id<MTLTexture> raw = present_raw_src(src);
     fx_state fx = {0};
