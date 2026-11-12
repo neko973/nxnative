@@ -2395,13 +2395,20 @@ static void fstep_tick(const win_t *o, int c) {
     // in fullscreen: frames of 16.8 ms, p95 18.6) three late frames in a row sent the hold to 40 fps for seconds, 11-29% of a walk, though the scene ran at 57 fps. The hold
     // now moves up only when 16 of the last 24 frames were late by the tolerance, or 3 in a row by a whole tick; single late frames are shown a tick later and paid back
     if (fs_t120() && !(mtl_snap_on() && mtl_link_active())) {
-        static int sticky = -1; if (sticky < 0) { const char *e = getenv("DM_FPS_STICKY"); sticky = !(e && !strcmp(e, "0")); }
+        // (11-12) An hour of play stepped up 17 times, 14 of them for a burst that was over within the second the hold then waits before its trial (GPU 20-27 ms for
+        // 16 to about 40 frames, mostly where an area streams in): a second at 40 fps and a trial for a third of a second of late frames. A late frame at the shorter
+        // hold is shown on the next tick and paid back by the step, which is what the longer hold shows too, and it ends with the burst. So the hold now moves up when
+        // 36 of the last 48 frames were late by the tolerance (about a second of it), or 8 in a row by a whole tick. DM_FPS_STICKY=1 keeps 16 of 24 and 3
+        static int sticky = -1; if (sticky < 0) { const char *e = getenv("DM_FPS_STICKY"); sticky = e ? atoi(e) : 2; if (sticky < 0 || sticky > 2) sticky = 2; }
+        // Test: DM_FSTEP_BURST=<period>,<frames>,<ticks> adds that many ticks to the cost of so many frames every period presents (a burst of GPU time as the frame step sees it)
+        { static int bp = -1, bn, bt10; if (bp < 0) { const char *e = getenv("DM_FSTEP_BURST"); int a = 0, n = 0; float t = 0; bp = e && sscanf(e, "%d,%d,%f", &a, &n, &t) == 3 && a > 0 && n > 0 ? a : 0; bn = n; bt10 = (int)(t * 10); }
+          if (bp && o->presents > (uint64_t)bp && o->presents % (uint64_t)bp < (uint64_t)bn) cost += bt10 / 10.0; }
         if (sticky && g_fs.late_tol > 0) {
-            static uint32_t hist; static int hk, way_run; int k = g_fs.k ? g_fs.k : kmin;
+            static uint64_t hist; static int hk, way_run; int k = g_fs.k ? g_fs.k : kmin;
             if (k != hk) { hk = k; hist = 0; way_run = 0; }
-            hist = hist << 1 | (uint32_t)(shown > k + g_fs.late_tol || cost > k + g_fs.late_tol);
+            hist = hist << 1 | (uint64_t)(shown > k + g_fs.late_tol || cost > k + g_fs.late_tol);
             way_run = cost > k + 1.0 ? way_run + 1 : 0;
-            g_fs.screen = __builtin_popcount(hist & 0xffffff) >= 16 || way_run >= 3 ? 2 : 1;
+            g_fs.screen = sticky == 1 ? (__builtin_popcountll(hist & 0xffffffull) >= 16 || way_run >= 3 ? 2 : 1) : (__builtin_popcountll(hist & 0xffffffffffffull) >= 36 || way_run >= 8 ? 2 : 1);
             // Test: DM_FSTEP_KICK=<presents> reports three late frames every so many presents at the shortest hold, the step up a burst causes, to measure how long the hold takes to come back
             { static int kick = -1; if (kick < 0) { const char *e = getenv("DM_FSTEP_KICK"); kick = e ? atoi(e) : 0; if (kick < 0) kick = 0; }
               if (kick && k == kmin && o->presents > (uint64_t)kick && o->presents % (uint64_t)kick < 3) g_fs.screen = 2; }
