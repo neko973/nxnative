@@ -6117,6 +6117,7 @@ void mtl_set_depth_zero(int on) {
 // DM_NVN_HILITE and DM_NVN_MAGSCAN) keeps the MTLDevice path
 static os_unfair_lock g_fn4_lock = OS_UNFAIR_LOCK_INIT;
 static NSMapTable *g_fn4;   // id<MTLFunction> → MTL4FunctionDescriptor
+static uint64_t g_fn4_kept;   // plain notes that left a specialized descriptor in place (under g_fn4_lock; logged with the mesh predictions)
 static id<MTLFunction> fn4_note(id<MTLFunction> f, id<MTLLibrary> lib, NSString *name, MTLFunctionConstantValues *cv) {
     if (!f || !lib || !name) return f;
     MTL4LibraryFunctionDescriptor *ld = [MTL4LibraryFunctionDescriptor new]; ld.library = lib; ld.name = name;
@@ -6124,6 +6125,16 @@ static id<MTLFunction> fn4_note(id<MTLFunction> f, id<MTLLibrary> lib, NSString 
     if (cv) { MTL4SpecializedFunctionDescriptor *sd = [MTL4SpecializedFunctionDescriptor new]; sd.functionDescriptor = ld; sd.constantValues = cv; d = sd; }
     os_unfair_lock_lock(&g_fn4_lock);
     if (!g_fn4) g_fn4 = [[NSMapTable alloc] initWithKeyOptions:NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality valueOptions:NSPointerFunctionsStrongMemory capacity:0];   // by identity: a function made again from the same library and name (other constants: bf_fn) is another function
+    // A note without constants never replaces a specialized one. Metal hands out one MTLFunction per function content (see FnVariant below), and shader_load notes a function
+    // plain first and with its constants a few lines later, so every later load of a shader with that content (another thread's: the prefetch, mtk_predict, the prewarm) put
+    // the plain descriptor back for a moment. A pipeline another thread described in that moment (mtk_desc4, pso4 descriptors) carried an unspecialized function that declares
+    // constants, and Metal aborts on it when the archive compiles it (arch_capture: "fragmentFunction main0 cannot be used to build a pipeline state. Use
+    // newFunctionWithName:constantValues:"): Ocarina of Time with mesh pipelines predicted in the background, one run in about twenty, at the Water Temple's entrance
+    if (!cv && [[g_fn4 objectForKey:f] isKindOfClass:MTL4SpecializedFunctionDescriptor.class]) {
+        uint64_t n = ++g_fn4_kept; os_unfair_lock_unlock(&g_fn4_lock);
+        if (n == 1 || n == 100 || n % 2000 == 0) MLOG("function descriptors: %llu plain notes so far left a specialized descriptor in place (a shader loaded again; %s)", (unsigned long long)n, name.UTF8String);
+        return f;
+    }
     [g_fn4 setObject:d forKey:f];
     os_unfair_lock_unlock(&g_fn4_lock);
     return f;
@@ -14451,8 +14462,10 @@ static void mtk_predict(NSString *tkey, NSString *mkey, NSString *fkey) {
         // Off unless the switch is set in this tree (PR #2307 had it on above 16 GiB): one run in about twenty with it on aborted at the Water Temple's entrance in Metal's validation of a
         // predicted pipeline as the archive took it (arch_capture: "Mesh Render Pipeline Descriptor Validation: fragmentFunction main0 cannot be used to build a pipeline state. Use
         // newFunctionWithName:constantValues:"). A state's key carries the border bit of the program it was met with, and this tree's pixel shaders declare the border function constant
-        (void)mem; want = e ? atoi(e) : 0; if (want < 0) want = 0; if (want > MTK_STATES) want = MTK_STATES;
-        MLOG("native mesh pipelines: %s (%s)", want ? "built in the background when the game makes the program" : "built at their first draw only", e ? "DM_NVN_MESH_PREDICT" : "off by default");
+        // (11-12) That abort was a function descriptor read while another thread loaded the same shader again (fn4_note: a plain note no longer replaces a specialized one), so
+        // the default is PR #2307's again. An hour of play with it off built ten mesh pipelines at their first draw, 187-339 ms each: the session's longest frames
+        want = e ? atoi(e) : mem > (16ull << 30) ? MTK_STATES : 0; if (want < 0) want = 0; if (want > MTK_STATES) want = MTK_STATES;
+        MLOG("native mesh pipelines: %s (%s)", want ? "built in the background when the game makes the program" : "built at their first draw only", e ? "DM_NVN_MESH_PREDICT" : want ? "the default above 16 GiB of memory" : "the default up to 16 GiB of memory");
     }
     if (!want || !progpf_first([NSString stringWithFormat:@"M|%@|%@|%@", tkey ?: @"-", mkey, fkey ?: @"-"])) return;
     uint64_t frame = atomic_load(&g_cur_frame);
