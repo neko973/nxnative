@@ -38,5 +38,12 @@ class UpscalerSetting(unittest.TestCase):
                 up=[s for s in settings.build(gid,tmp,'unused')['settings'] if s['env']=='DM_UPSCALER']
                 self.assertEqual(bool(up),shown,gid)
                 if up:self.assertEqual((up[0]['default'],up[0]['options']),('game',[['game',"Game's own"],['metalfx','MetalFX']]))
+    def test_a_profile_can_start_a_mac_on_metalfx(self):
+        with tempfile.TemporaryDirectory() as tmp,patch.object(settings.nacp,'languages',return_value=['en-US']):
+            (Path(tmp)/'main.fixups.tsv').write_text('')
+            for platform,want in [('mac','metalfx'),('ios','game')]:   # Ocarina of Time (upscaler_mac metalfx)
+                with patch.dict(settings.os.environ,{'SETTINGS_PLATFORM':platform}):
+                    up=next(s for s in settings.build('0400486024DEC000',tmp,'unused')['settings'] if s['env']=='DM_UPSCALER')
+                self.assertEqual(up['default'],want,platform)
 
 if __name__=='__main__':unittest.main()

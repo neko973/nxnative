@@ -55,6 +55,9 @@ draw_barriers	game
 # Texture filtering: the game asks for 1x and 2x anisotropy only, so ground and walls blur where the camera looks along them. 16x on its mipmapped linear samplers cost nothing measurable on an
 # M3 Pro (GPU p50 12.0 ms either way at Hyrule Castle; 13.4 against 13.9-14.5 ms at a heavier save, one run each); the Mac settings window's Texture filtering changes it
 tex_aniso	16
+# The game's upscaling step (agl_ndsr_vr's network, which takes the frames before into account) is drawn by MetalFX's spatial scaler on a Mac: the network took about 1.6 ms of GPU a frame more on an
+# M3 Pro and showed a double image of the player character while turning. The 60 fps here was tuned with MetalFX; the Mac settings window's Game's upscaler gives the network back
+upscaler_mac	metalfx
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on
