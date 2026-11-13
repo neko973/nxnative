@@ -2435,7 +2435,9 @@ static void fstep_tick(const win_t *o, int c) {
     { static double lt = -1; if (lt < 0) { const char *e = getenv("DM_FPS_LATE_TICKS"); lt = e ? atof(e) : 0.4; if (!(lt > 0 && lt < 1)) lt = 0.4; }
       g_fs.late_tol = fs_t120() ? lt : 0; g_fs.up_tol = fs_t120() ? lt : 0; }
     g_fs.fit_slack = fs_t120() ? g_fs.late_tol / 2 : 0;   // ticks mode: back to the shorter hold when the cost is within 1.7 ms of it (18.3 ms for 60 fps)
-    g_fs.hold_cap = fs_t120() && g_fs.k <= 3 ? 3600 : 0;   // ticks mode: after failed trials for 60 fps the next one waits up to 60 s (1, 4, 16, 60 s), not 8; from 30 fps the 8 s stay
+    // (11-13) on a screen below 120 Hz the hold above 60 fps is 30 (kgran, below), and a trial from it is a trial for 60 fps: the same 60 s. With the 8 s a base M4 whose GPU
+    // takes 19 ms in a scene went up and down 350 times in 49 minutes of play (202 failed trials, one every 15 s, each a burst of uneven frames: "30 with dips to 20")
+    g_fs.hold_cap = fs_t120() && (g_fs.k <= 3 || (fs_t120() == 2 && !atomic_load(&g_t120_ok))) ? 3600 : 0;   // ticks mode: after failed trials for 60 fps the next one waits up to 60 s (1, 4, 16, 60 s), not 8; from 30 fps to 40 the 8 s stay
     g_fs.kcap = fs_t120() ? 6 : 0;   // 40 fps: steps up to 6 ticks (3 vsyncs, as in whole vsyncs), so hold 4 can still pay back
     g_fs.kgran = fs_t120() == 2 && !atomic_load(&g_t120_ok) ? 2 : 0;   // 60 fps in ticks on a screen below 120 Hz: holds of whole vsyncs only (2 or 4 ticks; 3 is 40 fps)
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
