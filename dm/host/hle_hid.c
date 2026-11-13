@@ -287,14 +287,27 @@ uint32_t dm_player_npad(int p) { return p <= 0 ? connected_id() : (uint32_t)p; }
 // Handheld, bit 9 Other: all of them until SetSupportedNpadIdType, as the hid service starts)
 static _Atomic uint32_t g_players = 1, g_ids_supported = 0x3ff;
 static uint32_t id_bit(uint32_t id) { return id < DM_PLAYERS ? 1u << id : id == NPAD_HANDHELD ? 1u << 8 : id == 0x10 ? 1u << 9 : 0; }
-static int reported(int p) { return p == 0 || (atomic_load(&g_players) >> p & 1 && atomic_load(&g_ids_supported) & id_bit((uint32_t)p)); }
+// The most players the game takes: the maximum of its last controller applet call (ctrl_support; 0: no limit yet). On a Switch the applet leaves no more controllers connected
+// than that. Here the players past it are not reported, and with a maximum of one they feed player 1 as a one-player game's do (merged_players), so any connected controller
+// plays. Without it The Legend of Zelda: Ocarina of Time (Switch 2), which supports No1..No4 and plays alone, opened the applet again at once for as long as a second
+// controller was connected (3,472 times in one session: the game stood still, no music, no input)
+static _Atomic int g_players_max;
+static _Atomic uint32_t g_players_own;   // dm_pad_players' mask as the front end gave it: bit 0 only while a controller of its own holds player 1
+static int player_on(int p) { return atomic_load(&g_players) >> p & 1 && atomic_load(&g_ids_supported) & id_bit((uint32_t)p); }
+static int reported(int p) {
+    if (p == 0) return 1;
+    if (!player_on(p)) return 0;
+    int max = atomic_load(&g_players_max), rank = 1;
+    for (int q = 1; max > 0 && q < p; q++) rank += player_on(q) != 0;
+    return max <= 0 || rank < max;
+}
 // Players with a controller whose npad the game does not support. A one-player game (no npad past No1 supported) gets them as player 1, so any controller plays it; in a game for
 // fewer players than are connected (a fifth controller in a four-player game) they are not used, as on the Switch, where the system does not connect them
 static uint32_t unsupported_players(void) {
     uint32_t m = 0; for (int p = 1; p < DM_PLAYERS; p++) if (atomic_load(&g_players) >> p & 1 && !reported(p)) m |= 1u << p;
     return m;
 }
-static int one_player(void) { return !(atomic_load(&g_ids_supported) & ((1u << DM_PLAYERS) - 2)); }
+static int one_player(void) { return !(atomic_load(&g_ids_supported) & ((1u << DM_PLAYERS) - 2)) || atomic_load(&g_players_max) == 1; }
 static uint32_t merged_players(void) { return one_player() ? unsupported_players() : 0; }
 static int player_of(uint32_t id) {   // the reported player on npad id; -1 when none
     if (id == connected_id()) return 0;
@@ -326,12 +339,22 @@ static int split_target(int p) {
     }
     return mine;
 }
+// In a game for one player every controller plays player 1 (merged_players). While no controller of its own holds player 1, a merged pad that holds a pair of Joy-Cons is the
+// one player 1's npad shows: a controller that came back as player 2 (its seat while another controller was player 1) is still seen as Joy-Cons. Docked only; 0: none
+static int joy_lent(void) {
+    if (dm_opmode() == 0 || (atomic_load(&g_players_own) & 1) || atomic_load(&g_joy_sides[0])) return 0;
+    uint32_t m = merged_players();
+    for (int q = 1; q < DM_PLAYERS; q++) if ((m >> q & 1) && atomic_load(&g_joy_sides[q]) == 3 && (joy_supported(q) & STYLE_JOYDUAL)) return q;
+    return 0;
+}
 static npad_ref npad_resolve(uint32_t id) {
     npad_ref r = {-1, KIND_NONE};
     int pl = player_of(id);
     if (pl >= 0) {
         r.pad = pl; r.kind = KIND_PAD;
-        if (joy_active(pl)) {
+        int lent = pl == 0 ? joy_lent() : 0;
+        if (lent) { r.pad = lent; r.kind = KIND_DUAL; }
+        else if (joy_active(pl)) {
             uint32_t s = atomic_load(&g_joy_sides[pl]);
             if (s == 3) r.kind = joy_split(pl) ? (atomic_load(&g_single_keep[pl]) == 2 ? KIND_RIGHT : KIND_LEFT) : (joy_supported(pl) & STYLE_JOYDUAL ? KIND_DUAL : KIND_PAD);
             else r.kind = s == 1 ? KIND_LEFT : KIND_RIGHT;
@@ -379,11 +402,12 @@ static void note_merged(void) {   // logs the players whose npad the game does n
     static _Atomic uint32_t last; uint32_t m = unsupported_players(), one = (uint32_t)one_player();
     if (atomic_exchange(&last, m | one << 31) == (m | one << 31)) return;
     for (int p = 1; p < DM_PLAYERS; p++) if (m >> p & 1) {
-        if (one) LOG("hid: player %d's controller feeds player 1: the game supports one player (no npad %d)", p + 1, p);
+        if (one) LOG("hid: player %d's controller feeds player 1: the game takes one player", p + 1);
         else LOG("hid: player %d's controller is not used: the game supports no npad %d", p + 1, p);
     }
 }
 void dm_pad_players(uint32_t mask) {
+    atomic_store(&g_players_own, mask & ((1u << DM_PLAYERS) - 1));
     mask = (mask | 1u) & ((1u << DM_PLAYERS) - 1);
     uint32_t old = atomic_exchange(&g_players, mask);
     for (int p = 1; p < DM_PLAYERS; p++) if ((old ^ mask) >> p & 1) {
@@ -511,13 +535,13 @@ static uint64_t stick_dirs(const int32_t a[4]) {
     return b;
 }
 // A Joy-Con style npad (JoyDual: both Joy-Cons of pad r.pad; JoyLeft / JoyRight: one): each Joy-Con's own buttons, rail buttons included, and its own stick, in the stick field of its side
-static void fill_joy(NpadState *s, npad_ref r) {
+static void fill_joy(NpadState *s, npad_ref r, int first) {   // first: the npad is player 1's
     uint64_t b = 0; int32_t a[4] = {0}; int left = r.kind != KIND_RIGHT, right = r.kind != KIND_LEFT;
     for (int side = 0; side < 2; side++) if (side == 0 ? left : right) {
         b |= atomic_load(&g_joy_btn[r.pad][side]) | atomic_exchange(&g_joy_latch[r.pad][side], 0);
         uint64_t v = atomic_load(&g_joy_axes[r.pad][side]); a[2 * side] = ax(v, 0); a[2 * side + 1] = ax(v, 1);
     }
-    if (r.pad == 0 && r.kind == KIND_DUAL) {   // player 1's keyboard / touch and scripted input (DM_KEYS, DM_CTL) play beside a pair of Joy-Cons as beside any other controller
+    if (first && r.kind == KIND_DUAL) {   // player 1's keyboard / touch and scripted input (DM_KEYS, DM_CTL) play beside a pair of Joy-Cons as beside any other controller
         keys_sync();
         b |= atomic_load(&g_btn) | atomic_exchange(&g_latch, 0) | atomic_load(&g_sc_btn) | atomic_exchange(&g_sc_latch, 0);
         uint64_t k = atomic_load(&g_axes), c = atomic_load(&g_sc_axes); for (int i = 0; i < 4; i++) a[i] = pick(pick(a[i], ax(k, i)), ax(c, i));
@@ -533,7 +557,7 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
     s->sampling = atomic_fetch_add(&g_sampling, 1) + 1;
     npad_ref ref = npad_resolve(id);
     if (!(kind_style(ref, id) & style) || ref.pad < 0 || ref.pad >= DM_PLAYERS) return;   // no controller of this id / style: attributes = 0
-    if (ref.kind >= KIND_DUAL) { fill_joy(s, ref); return; }
+    if (ref.kind >= KIND_DUAL) { fill_joy(s, ref, id == connected_id()); return; }
     int pl = ref.pad;
     // Player 1: keyboard / touch, script, its controller and the players merged into it; another player: its own controller path
     uint32_t src = pl ? 1u << pl : 1u | merged_players();
@@ -654,6 +678,14 @@ int dm_players_reported(void) {   // a pair of Joy-Cons split into two npads is 
     return n;
 }
 static Result ctrl_support(int32_t *info, const int8_t *arg) {
+    if (arg) {   // the game's maximum is the most players it takes from here on (g_players_max): the applet leaves no more connected, on a Switch by asking the player
+        uint32_t was = 0; for (int p = 1; p < DM_PLAYERS; p++) was |= (uint32_t)reported(p) << p;
+        int max = arg[1] > 0 ? arg[1] : 0;
+        if (atomic_exchange(&g_players_max, max) != max) {
+            for (int p = 1; p < DM_PLAYERS; p++) if ((uint32_t)reported(p) != (was >> p & 1)) { dm_haptics_clear(p); style_changed((uint32_t)p); }
+            note_merged();
+        }
+    }
     int count = dm_players_reported(), canceled = 0;
     // Too few players, but a pair of Joy-Cons is two when each is held sideways (single assignment): the applet splits the pair, as the player does on a Switch, to reach the minimum
     for (int p = 0; arg && count < arg[0] && p < DM_PLAYERS; p++)

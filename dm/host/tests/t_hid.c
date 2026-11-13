@@ -119,6 +119,15 @@ static void t_npads(void) {
     CHECK(applet_opens == 1 && applet_depth == 0 && applet_closes_at_depth0 == 1, "the controller applet opens and closes once around its answer (focus 2, then 1)");
     arg[1] = 1; h_hid_ShowCtrl(info, arg);
     CHECK(info[0] == 1, "the applet's count is capped at the game's maximum");
+    {   // a game that supports several npads but asks for one player: the second controller is gone from its npad and plays player 1, so the game does not ask again
+        uint32_t no1 = 0, no2 = 1; NpadState st[1];
+        CHECK(dm_players_reported() == 1 && !h_hid_GetStyle(&no2) && h_hid_GetStyle(&no1) == STYLE_FULLKEY, "after a one-player applet call only player 1 is reported");
+        h_hid_ShowCtrl(info, arg); CHECK(info[0] == 1, "asked again, the applet has one player to report");
+        h_hid_StatesFullKey(st, 1, &no1);
+        CHECK((st[0].buttons & (DM_BTN_Y | DM_BTN_B)) == (DM_BTN_Y | DM_BTN_B), "the second controller's buttons reach player 1 beside player 1's own");
+        arg[1] = 4; h_hid_ShowCtrl(info, arg); arg[1] = 1;
+        CHECK(info[0] == 2 && h_hid_GetStyle(&no2) == STYLE_FULLKEY, "a later call for up to four players reports the second controller on its npad again");
+    }
     arg[0] = 3; arg[1] = 4;
     CHECK(h_hid_ShowCtrl(info, arg) == RES_CTRL_CANCELED && info[0] == 2, "fewer players than the game's minimum: canceled (2202-3101), as the player closing the applet");
     CHECK(h_hid_ShowCtrl0(arg) == RES_CTRL_CANCELED, "the overload without a result: canceled too");
@@ -140,7 +149,7 @@ static void t_npads(void) {
         g_prompt_answer = -1;
     }
     CHECK(h_hid_Strap() == RES_OK && h_hid_StrapArg(arg) == RES_OK, "both strap guide overloads answer as the player closing the guide");
-    CHECK(applet_opens == 12 && applet_depth == 0, "every answer opened and closed its applet");
+    CHECK(applet_opens == 14 && applet_depth == 0, "every answer opened and closed its applet");
     arg[0] = 1;
     CHECK(six_connected(0x0100 | 0) && !six_connected(0x0200 | 0), "player 2 has a six-axis sensor, No3 none");
 
@@ -226,6 +235,19 @@ static void t_joycons(void) {
     CHECK(h_hid_GetStyle(&(uint32_t){1}) == STYLE_JOYRIGHT, "one right Joy-Con alone: JoyRight on its own npad");
     dm_joy_attach(1, 0); dm_joy_attach(0, 0);
     CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_FULLKEY && h_hid_GetStyle(&(uint32_t){1}) == STYLE_FULLKEY, "no Joy-Con reported any more: full-key controllers, as before");
+    {   // A game for one player (its applet call), the pair of Joy-Cons on player 2 because another controller was player 1 when it came back, and that controller gone:
+        // player 1's npad is the pair, as Joy-Cons, with the keyboard beside it; with a controller of its own on player 1 the pair feeds it as a full-key pad
+        int32_t info[2]; int8_t one[8] = {1, 1}, four[8] = {1, 4};
+        dm_pad_players(2); dm_joy_attach(1, 3); h_hid_ShowCtrl(info, one);
+        CHECK(info[0] == 1 && h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYDUAL && h_hid_GetStyle(&(uint32_t){1}) == 0, "one player, the pair on player 2 alone: No1 is a JoyDual npad, No2 empty");
+        dm_joy_set(1, 0, DM_BTN_UP, -9000, 0); dm_joy_set(1, 1, DM_BTN_A, 0, 7000); dm_input_set(DM_BTN_X, 0, 0, 0, 0);
+        NpadState s1 = npad_of(0, STYLE_JOYDUAL);
+        CHECK((s1.buttons & (DM_BTN_UP | DM_BTN_A | DM_BTN_X)) == (DM_BTN_UP | DM_BTN_A | DM_BTN_X) && s1.lx == -9000 && s1.ry == 7000, "its Joy-Cons' buttons and sticks, and the keyboard's, on No1");
+        dm_input_set(0, 0, 0, 0, 0); npad_of(0, STYLE_JOYDUAL);
+        dm_pad_players(3);
+        CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_FULLKEY && h_hid_GetStyle(&(uint32_t){1}) == 0, "a controller of its own on player 1: No1 is full-key again, the pair still feeds it");
+        dm_joy_set(1, 0, 0, 0, 0); dm_joy_set(1, 1, 0, 0, 0); dm_joy_attach(1, 0); h_hid_ShowCtrl(info, four);
+    }
     dm_haptics_route(0, 0); dm_pad_players(1); h_hid_SetStyles(0xffffffffu);
 }
 
