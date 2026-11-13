@@ -26,7 +26,7 @@ In a window the picture is composited by the window server, which costs about 1.
 
 An earlier version of this page gave sweep numbers that were taken while the display was asleep (the runs' logs show a 2560x1440 drawable and no fullscreen switch); they are replaced by the screen-on numbers above.
 
-The picture is the one the game draws docked with graphics scale tier 1: 3D passes at 1536x864, the picture at 2048x1152, as upstream drew it until `084f5aa5`. Upstream now answers tier 0 (1920x1080 and 2560x1440, about 56 % more pixels); here that is `DM_GFX_SCALE=0`. On this GPU the village then runs at an even 40 fps (52 fps unpaced) and the field at about 59.
+The picture is the one the game draws docked with graphics scale tier 1: 3D passes at 1536x864, the picture at 2048x1152, as upstream drew it until `084f5aa5`. Upstream now answers tier 0 (1920x1080 and 2560x1440, about 56 % more pixels); here that is the settings window's **Full resolution** (`DM_FULL_RES=1`), off by default. On this GPU the village then runs at an even 40 fps (52 fps unpaced) and the field at about 59. [A sharper picture](#a-sharper-picture) has the choices between the two.
 
 ## What changed
 
@@ -158,6 +158,25 @@ DM_METAL_HUD=1
 - `DM_METAL_HUD=1` shows Apple's performance HUD. Its frame interval line is blue only for frames within 16.7 ms and red for anything longer, so 40 fps is red however even it is. Its GPU time includes the clock keeper's own work, so it reads 17-22 ms during a burst though the game's frames take less: go by the frame rate.
 - `DM_GPU_KEEP=hold` puts the GPU's clock back up in six-second bursts when frames run late (see What changed); the log says once a minute how often it came on and how long it spun. `DM_GPU_KEEP_BURST=<seconds>` changes the burst, `DM_GPU_KEEP=1` spins all the time (a warmer Mac, more battery), `DM_GPU_KEEP=0` turns it off (stretches at about 50 fps where macOS lowers the clock).
 
+## A sharper picture
+
+Nothing here is on by default: the defaults are the picture the 60 fps was tuned with. All of it is in the app's settings window, under **Game** (the last two under **Advanced settings**), and can be combined.
+
+| Choice | In the settings window | GPU time a frame | Frame rate | Fine detail |
+|---|---|---|---|---|
+| As built | nothing changed | 13.9 ms | 59.8 fps | the reference |
+| Larger picture, 3D as built | **Full resolution** on, **Render scale** 80 % | 14.5 ms | 59.8 | +14 to +64 % |
+| The same, sharpened | and **Sharpening**: Light | 14.8 ms | 59.9 | +46 to +103 % |
+| The same, MetalFX to the screen | **Full resolution** on, **Render scale** 80 %, **Upscaling**: MetalFX | 14.7 ms | 60.0 | about +500 % |
+| As built, MetalFX to the screen | **Upscaling**: MetalFX | 13.9 ms | 59.9 | about +450 % |
+| Full resolution | **Full resolution** on | 17.2 ms | 57.0 | +55 to +99 % |
+
+- **Measured** on an M3 Pro (14 GPU cores), fullscreen on its 3024x1964 screen, standing one minute on a roof of Kakariko Village looking over it, one run each; 60 fps allows 16.7 ms. Fine detail is the energy of the picture's second differences in three crops of the same view (a wall, roofs, far trees) against the first row: it says how much contrast the finest pattern has, not whether that looks better.
+- **Full resolution** draws the picture at 2560x1440 with 3D views of 1920x1080, instead of 2048x1152 and 1536x864: every pass has about 56 % more pixels, and the heavy view leaves 60 fps. **Render scale** 80 % with it puts the 3D views back near their size as built (1559x877); the game's own upscaling step then makes a 2560x1440 picture from them, and the HUD and text are drawn at that size.
+- **Sharpening** and **Upscaling: MetalFX** work on the last step, the stretch of the finished picture to the screen, so they add contrast at edges and no detail. MetalFX is by far the crispest and outlines edges hard, which can look drawn rather than natural; Light sharpening is the mild one. **Sharpening** is shown while **Upscaling** is Standard.
+- **Render scale** means a share of the game's own 3D size, as in every other game: 100 % is the game's own, 50 % half its width and height. Until 2026-11-13 it was a share of the whole picture for this game, of which the game's own 3D views are 75 %, so 80 to 95 % drew more than 100 % did and only settings below 75 % were lighter. A setting saved before then now draws less than it did.
+- **Slower Macs:** the first row is the lightest of these. To go lighter, lower **Render scale**: 65 % (3D views of 1000x562) took 17 % less GPU time here, 13.9 to 11.5 ms, and 50 % (781x439) 23 % less, 10.7 ms; the picture gets visibly softer with each step.
+
 ## Check that it works
 
 The log is `~/Library/Logs/nxnative/0400486024DEC000.log`. After a minute of play it should contain:
@@ -190,7 +209,7 @@ An app built before 2026-11-12 gets the switch with the quick update ([Update to
 ## If it runs at 30 fps
 
 - **Exactly 30, everywhere, on a screen below 120 Hz** (a MacBook Air, an iMac, an external screen, or a MacBook Pro's screen set to 60 Hz): a mistake in this branch until 2026-11-12. The frame step capped the game at 30 on every screen that does not show 120 Hz, whatever the Mac could do. The log then has `frame step cap 0 → 30 fps at present 1`. Update the app ([Update to the newest version](#update-to-the-newest-version): a few minutes, no dump needed); the log line becomes `frame step cap 0 → 60 fps`.
-- **30 or 40 in some places, 60 in others:** the Mac's GPU does not hold 60 there. A base M4 (10 GPU cores) takes about 19 ms a frame in the heavier outdoor scenes at full resolution, where 60 fps allows 16.7; the M3 Pro this was tuned on takes 13-14. Until 2026-11-13 the game also tried 60 again every 15 seconds on a 60 Hz screen and fell back each time, which felt like dips to 20; it now waits a minute between tries. The `frame step: game time` lines of the log say how the frames were shared between 60, 40 and 30. In the settings window, lower **Render scale** a step at a time, keep the game fullscreen (a window costs GPU time), and stop anything that records or streams the screen. On a Mac that still does not hold 60, **Frame rate: 30** (or 40 on a 120 Hz screen) gives even frames instead of a rate that changes.
+- **30 or 40 in some places, 60 in others:** the Mac's GPU does not hold 60 there. A base M4 (10 GPU cores) takes about 19 ms a frame in the heavier outdoor scenes at full resolution, where 60 fps allows 16.7; the M3 Pro this was tuned on takes 13-14. Until 2026-11-13 the game also tried 60 again every 15 seconds on a 60 Hz screen and fell back each time, which felt like dips to 20; it now waits a minute between tries. The `frame step: game time` lines of the log say how the frames were shared between 60, 40 and 30. In the settings window, lower **Render scale** a step at a time (65 % took 17 % off the GPU time on the M3 Pro, 50 % took 23 %; before 2026-11-13 the slider was wrong for this game and only its settings below 75 % were lighter, so update first), keep the game fullscreen (a window costs GPU time), and stop anything that records or streams the screen. On a Mac that still does not hold 60, **Frame rate: 30** (or 40 on a 120 Hz screen) gives even frames instead of a rate that changes.
 - **Anything else:** send the run log, `~/Library/Logs/nxnative/0400486024DEC000.log`, taken after a minute of play, with the Mac's model and its screen. The files in the build's `logs` folder only show that the build worked.
 
 ## Known limits

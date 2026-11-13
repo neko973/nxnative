@@ -173,6 +173,10 @@ def header_one(g):
     if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.]{0,30}', ufc): sys.exit(f'{g.id}: ue_fps_cvar must be a console variable name: {ufc}')
     ta = g.get('tex_aniso', '0')   # texture filtering by default (nvn_mtl.m samp_by_id; DM_NVN_ANISO and the Mac settings window's Texture filtering override it): the least anisotropy of mipmapped linear samplers, 0 = the game's own
     if ta not in ('0', '4', '8', '16'): sys.exit(f"{g.id}: tex_aniso must be 0 (the game's own), 4, 8 or 16: {ta}")
+    gsf = g.get('gfx_scale_full', '-1')   # the graphics scale tier (Switch 2, hle_oe.c gfx_scale) at which the game draws its largest picture, when that is not the tier the host answers by operation mode: the settings window's Full resolution (DM_FULL_RES=1) answers it; -1 = the game has no such tier, and no such setting
+    if gsf not in ('-1', '0', '1', '2'): sys.exit(f'{g.id}: gfx_scale_full must be a tier, 0 to 2 (or -1, none): {gsf}')
+    rso = g.words('render_scale_own', '1 1')   # for a render scale stub that takes a fraction of the output, not of the game's own 3D size: the fraction of the output the game's own 3D views take, docked then handheld. The loader multiplies DM_RENDER_SCALE by it, so the setting is a fraction of the game's own size in every game; 1 = the stub takes that already
+    if len(rso) != 2 or not all(re.fullmatch(r'0\.\d+|1', x) and float(x) > 0 for x in rso): sys.exit(f'{g.id}: render_scale_own is two fractions above 0, up to 1 (docked, then handheld): {" ".join(rso)}')
     ps = g.get('present_snap', 'off')   # present snapshots by default (nvn_mtl.m mtl_snap_on; DM_PRESENT_SNAP and the iOS launcher's Frame buffering override it): on / off
     if ps not in ('on', 'off'): sys.exit(f'{g.id}: present_snap must be on or off: {ps}')
     p4 = g.get('pso_mtl4', 'off')   # render pipelines through MTL4Compiler on iOS by default, with the pipeline archive and hybrid pipelines (on by default on the Mac; DM_PSO_MTL4 overrides): on / off
@@ -255,6 +259,8 @@ def header_one(g):
          f'#define DM_GAME_UE_FPS_CVAR {q(ufc)}',
          f'#define DM_GAME_PRESENT_SNAP {int(ps == "on")}',
          f'#define DM_GAME_TEX_ANISO {int(ta)}',
+         f'#define DM_GAME_GFX_SCALE_FULL {int(gsf)}',
+         f'#define DM_GAME_RENDER_SCALE_OWN_DOCKED {float(rso[0])}f', f'#define DM_GAME_RENDER_SCALE_OWN_HANDHELD {float(rso[1])}f',
          f'#define DM_GAME_PSO_MTL4 {int(p4 == "on")}',
          f'#define DM_GAME_ENC_THREAD {int(et == "on")}',
          *([f'#define DM_GAME_SHARED_FONT_TTF {int(sf == "ttf")}'] if g.get('shared_font', '') else []),   # without the key the host decides by the SDK version (hle_sdk16.c)

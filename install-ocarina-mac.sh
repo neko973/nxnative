@@ -163,7 +163,7 @@ print("launcher and Game Mode host:", pack_app.update_launcher(sys.argv[2]))
   echo "- The game files, the shaders and your saves were not touched. What was replaced is in"
   echo "  \"$KEEP\"; delete that folder once the game runs."
   echo "- The first start may prepare a few more pipelines behind the progress screen (seconds, not minutes)."
-  echo "- New in the settings window: Texture filtering, Texture size and Game Mode (docs/settings.md says what they do)."
+  echo "- In the settings window: Full resolution (off unless you turn it on), Texture filtering, Texture size and Game Mode; Render scale now counts from the game's own size (docs/settings.md says what they do)."
 }
 
 # The app's Check for Updates (dm/mac/Launcher.swift) runs these two. PROGRESS <percent> <text> lines are for its bar

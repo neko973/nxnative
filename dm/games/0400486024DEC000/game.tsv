@@ -42,6 +42,12 @@ shader_note	Ocarina of Time shaders
 fps_target	60
 
 # ---- Graphics ----
+# The picture: docked the game draws 2048x1152 with 3D views of 1536x864 at graphics scale tier 1, the tier the host answers docked, and 2560x1440 with 1920x1080 at tier 0 (about 56 % more
+# pixels: 17.2 against 13.9 ms of GPU a frame over Kakariko Village on an M3 Pro, 57 fps where tier 1 holds 60). The 60 fps here was tuned at tier 1; the Mac settings window's Full resolution answers tier 0
+gfx_scale_full	0
+# The render scale stub (patches.py render_scale) stores the host's factor as the scene's scale, a fraction of the picture, of which the game's own 3D views are 0.75 docked (1536 of 2048, 1920 of 2560)
+# and handheld (1440 of 1920): 0.8 there drew more than the game does. The loader multiplies the setting by this, so 100 % is the game's own size and anything below is smaller
+render_scale_own	0.75 0.75
 # agl wraps its clears in render conditions on Donkey Kong Bananza and Splatoon Raiders; the same library here
 render_cond	on
 gpu_timestamps	segment

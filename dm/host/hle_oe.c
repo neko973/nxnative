@@ -292,7 +292,18 @@ HLE_FORCE("_ZN2nn2oe22SetCpuOverclockEnabledEb", "CPU overclock switch (through 
 // goes to a renderer parameter (main+0x549614). Which tier the console reports in which mode is not measured: the host answers 0 handheld and 1 console, following the operation mode
 // DM_GFX_SCALE=0 / 1 / 2 answers that tier whatever the mode (upstream 084f5aa5c answers 0 by default: Ocarina of Time then draws 2560x1440 with 3D passes of 1920x1080 instead of
 // 2048x1152 and 1536x864, about 56 % more pixels). This branch keeps the answer by operation mode unless the switch is set: the 60 fps work here was measured with tier 1 docked
-static int gfx_scale(void) { const char *e = getenv("DM_GFX_SCALE"); int v = e && *e ? atoi(e) : -1; return v >= 0 && v <= 2 ? v : opmode() == 1; }
+// DM_FULL_RES=1 (the settings window's Full resolution) answers the tier at which the game draws its largest picture, for a game whose profile names one (gfx_scale_full: Ocarina of
+// Time's 0); DM_GFX_SCALE, a tier by number, comes first
+static int gfx_scale(void) {
+    const char *e = getenv("DM_GFX_SCALE"); int v = e && *e ? atoi(e) : -1; if (v >= 0 && v <= 2) return v;
+    const char *f = getenv("DM_FULL_RES");
+    if (DM_GAME_GFX_SCALE_FULL >= 0 && f && !strcmp(f, "1")) {
+        static _Atomic int said; if (!atomic_exchange(&said, 1)) LOG("graphics scale: tier %d, the game's full resolution (DM_FULL_RES=1)", DM_GAME_GFX_SCALE_FULL);
+        return DM_GAME_GFX_SCALE_FULL;
+    }
+    if (f && *f && strcmp(f, "0") && strcmp(f, "1")) { static _Atomic int said; if (!atomic_exchange(&said, 1)) LOG("[RED] DM_FULL_RES=%s: must be 0 or 1; keeping the tier of the console mode", f); }
+    return opmode() == 1;
+}
 HLE_FORCE("_ZN2nn2oe23GetCurrentGraphicsScaleEv", "graphics scale (Switch 2, through am): 0 handheld, 1 console (DM_GFX_SCALE sets a tier)", int, h_oe_GfxScale, void) { return gfx_scale(); }
 HLE_FORCE("_ZN2nn2oe42SetGraphicsScaleChangedNotificationEnabledEb", "graphics scale change notification (Switch 2, through am); the scale changes only with the operation mode",
           void, h_oe_GfxScaleNotify, unsigned on) { (void)on; }
