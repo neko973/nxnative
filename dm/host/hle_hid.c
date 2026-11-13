@@ -59,8 +59,33 @@ void dm_input_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t 
     uint64_t old = atomic_exchange(&g_btn, buttons); atomic_fetch_or(&g_latch, buttons & ~old); atomic_fetch_or(&g_peek_latch, buttons & ~old); atomic_store(&g_axes, pack(lx, ly, rx, ry));
     shake_note();
 }
+// DM_INPUT_LOG=1: for each controller, every 10 s it had input: how often the front end updated it, how long its presses waited for the game's next read, and how far its
+// sticks reached. It tells a slow controller link from a slow host: the wait is at most a frame when the host is not the slow part, and a stick that never reaches 100 %
+// makes a game feel sluggish though nothing is late
+static _Atomic int g_inlog = -1, g_inlog_events[DM_PLAYERS], g_inlog_reach[DM_PLAYERS][4];
+static _Atomic uint64_t g_inlog_press[DM_PLAYERS];   // when the oldest press the game has not read yet was set; 0: none
+static int inlog_on(void) { int v = atomic_load(&g_inlog); if (v < 0) { const char *e = getenv("DM_INPUT_LOG"); v = e && atoi(e) ? 1 : 0; atomic_store(&g_inlog, v); } return v; }
+static void inlog_set(int p, uint64_t pressed, const int32_t a[4]) {   // the front end's thread
+    if (!inlog_on()) return;
+    if (pressed) { uint64_t none = 0; atomic_compare_exchange_strong(&g_inlog_press[p], &none, now_ns()); }
+    atomic_fetch_add(&g_inlog_events[p], 1);
+    for (int i = 0; i < 4; i++) { int m = (int)((int64_t)(a[i] < 0 ? -a[i] : a[i]) * 100 / DM_STICK_MAX); if (m > atomic_load(&g_inlog_reach[p][i])) atomic_store(&g_inlog_reach[p][i], m); }
+}
+static void inlog_read(int p) {   // the game's read of pad p
+    if (!inlog_on() || p < 0 || p >= DM_PLAYERS) return;
+    static struct { uint64_t since; int n; double sum, max; } st[DM_PLAYERS];
+    uint64_t t = atomic_exchange(&g_inlog_press[p], 0), now = now_ns();
+    if (t && now > t) { double ms = (double)(now - t) / 1e6; st[p].n++; st[p].sum += ms; if (ms > st[p].max) st[p].max = ms; }
+    if (!st[p].since) st[p].since = now;
+    if (now - st[p].since < 10000000000ull) return;
+    int ev = atomic_exchange(&g_inlog_events[p], 0), r[4]; for (int i = 0; i < 4; i++) r[i] = atomic_exchange(&g_inlog_reach[p][i], 0);
+    if (ev) LOG("hid input log: player %d's controller: %d updates in %.0f s (%.0f a second); %d presses waited mean %.1f / max %.1f ms for the game's read; sticks reached %d %d %d %d %% (left x y, right x y)",
+                p + 1, ev, (double)(now - st[p].since) / 1e9, ev * 1e9 / (double)(now - st[p].since), st[p].n, st[p].n ? st[p].sum / st[p].n : 0.0, st[p].max, r[0], r[1], r[2], r[3]);
+    st[p].since = now; st[p].n = 0; st[p].sum = st[p].max = 0;
+}
 void dm_pad_set_player(int p, uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     if (p < 0 || p >= DM_PLAYERS) return;
+    inlog_set(p, buttons & ~atomic_load(&g_pad_btn[p]) & 0xffffull, (const int32_t[4]){lx, ly, rx, ry});
     uint64_t old = atomic_exchange(&g_pad_btn[p], buttons); atomic_fetch_or(&g_pad_latch[p], buttons & ~old); atomic_fetch_or(&g_peek_latch, buttons & ~old); atomic_store(&g_pad_axes[p], pack(lx, ly, rx, ry));
     if (!p) shake_note();
 }
@@ -537,6 +562,7 @@ static uint64_t stick_dirs(const int32_t a[4]) {
 // A Joy-Con style npad (JoyDual: both Joy-Cons of pad r.pad; JoyLeft / JoyRight: one): each Joy-Con's own buttons, rail buttons included, and its own stick, in the stick field of its side
 static void fill_joy(NpadState *s, npad_ref r, int first) {   // first: the npad is player 1's
     uint64_t b = 0; int32_t a[4] = {0}; int left = r.kind != KIND_RIGHT, right = r.kind != KIND_LEFT;
+    inlog_read(r.pad);
     for (int side = 0; side < 2; side++) if (side == 0 ? left : right) {
         b |= atomic_load(&g_joy_btn[r.pad][side]) | atomic_exchange(&g_joy_latch[r.pad][side], 0);
         uint64_t v = atomic_load(&g_joy_axes[r.pad][side]); a[2 * side] = ax(v, 0); a[2 * side + 1] = ax(v, 1);
@@ -568,6 +594,7 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
         uint64_t k = atomic_load(&g_axes); for (int i = 0; i < 4; i++) a[i] = ax(k, i);
     }
     for (int p = 0; p < DM_PLAYERS; p++) if (src >> p & 1) {
+        inlog_read(p);
         b |= atomic_load(&g_pad_btn[p]) | atomic_exchange(&g_pad_latch[p], 0);
         uint64_t v = atomic_load(&g_pad_axes[p]); for (int i = 0; i < 4; i++) a[i] = pick(a[i], ax(v, i));
     }
