@@ -58,6 +58,8 @@ typedef struct {
     double late_tol;          // set by the caller: what a frame may take over its hold before it is late, in the caller's unit (0 = FSTEP_LATE). In ticks of 1/120 s FSTEP_LATE is
                               // 0.83 ms, half the 1.7 ms it stands for: Ocarina of Time's village (GPU 22-24.5 ms, frames 24-26.5 ms) left hold 3 for 4 on frames of 25.6-26.5 ms
                               // and a failed probe stepped up to 4 at a cost of 3.07 ticks, so 38% of a walk ran at 30 fps that runs at 40 uncapped (hle_nvn.c fs_t120 sets 0.2)
+    int kgran;                // set by the caller: holds above kmin come this many apart (0 or 1 = every hold). Ticks of 1/120 s on a 60 Hz screen (hle_nvn.c, 60 fps in
+                              // ticks): 2, so the hold is 2 (60 fps) or 4 (30) and never 3, which a 60 Hz screen cannot show evenly
     int per_vsync;            // set by the caller: the ticks a 1/60 s vsync is (0 = 1). At 120 fps the unit is 1/120 s (hle_nvn.c fps_high), and the waits between trials stay the same real time
     double shown_slack;       // vsyncs a frame on time may show longer than k (set by the caller): one refresh on screens whose rate is not a multiple of 60; the cost keeps FSTEP_LATE
     int screen;               // set by the caller before each call, then cleared: 0 = judge lateness by shown and cost; 1 = the screen showed a recent frame on time, 2 = late. With present
@@ -81,6 +83,7 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     const double hold0 = FSTEP_HOLD0 * (s->per_vsync ? s->per_vsync : 1), hold_max = FSTEP_HOLD_MAX * (s->per_vsync ? s->per_vsync : 1);
     const double hcap = s->hold_cap > 0 ? s->hold_cap * (s->per_vsync ? s->per_vsync : 1) : hold_max; const int hmul = s->hold_cap > 0 ? 4 : 2;
     const int smax = s->kcap > 0 && s->kcap <= FSTEP_KMAX ? s->kcap : FSTEP_MAX;   // the largest step
+    const int g = s->kgran > 1 ? s->kgran : 1;   // holds above kmin come this many apart
     if (kmin < 1) kmin = 1;
     if (kmin > smax) kmin = smax;
     if (kmax > smax) kmax = smax;
@@ -103,6 +106,7 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     if (cap_probe) {   // the cap rose: a probe at once, whose grace covers the clocks still set for the longer hold
         s->k = kmin; s->probes++; s->trial = FSTEP_RUN; s->probe = 1; s->grace = FSTEP_GRACE; s->fit_run = s->late_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;
     } else if (kmin < s->kmin || s->k < kmin) s->k = kmin;   // the game's own step ended, or the cap fell
+    if (g > 1 && s->k > kmin && (s->k - kmin) % g) s->k += g - (s->k - kmin) % g;   // the spacing came into force at a hold between two of its holds (the window moved to a 60 Hz screen at 40 fps): the longer one
     if (s->k > kmax) s->k = kmax;
     s->kmin = kmin;
     int scr = s->screen; s->screen = 0;
@@ -133,15 +137,16 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     }
     if (s->late_run >= 3 && s->k < kmax) {   // step up to the cost, at least one vsync
         int want = (int)ceil(cost - (s->up_tol > 0 ? s->up_tol : s->late_tol > 0 ? s->late_tol : 0.05));   // a cost within the tolerance of a hold takes that hold
-        if (want < s->k + 1) want = s->k + 1;
+        if (want < s->k + g) want = s->k + g;
+        if (g > 1 && (want - kmin) % g) want += g - (want - kmin) % g;
         if (want > kmax) want = kmax;
         if (s->trial || (s->probe == 2 && s->since < hold_max)) { s->failed++; s->trial = 0; s->hold = s->hold * hmul < hcap ? s->hold * hmul : hcap; }
         else if (s->probe == 2) s->hold = hold0;   // the probe's run at kmin lasted
         if (held == kmin && s->run >= hold_max) s->cref = s->crun;   // kmin held 8 s at this cost
         s->k = want; s->ups++; s->late_run = s->fit_run = 0; s->since = 0; s->probe = 0;
     } else if (s->trial && !grace && !--s->trial) { if (s->probe) { s->probe = 2; s->since = 0; } else s->hold = hold0; }   // the trial held (a probe's run at kmin is judged at the next step up)
-    if (!late) s->fit_run = s->k > kmin && cost <= (s->fit_slack > 0 ? (s->k - 1) + s->fit_slack : FSTEP_FIT * (s->k - 1)) ? s->fit_run + 1 : 0;
-    if (s->fit_run >= FSTEP_RUN && s->since >= s->hold && !s->trial) { s->k--; s->downs++; s->trial = FSTEP_RUN; s->fit_run = 0; }
+    if (!late) s->fit_run = s->k > kmin && cost <= (s->fit_slack > 0 ? (s->k - g) + s->fit_slack : FSTEP_FIT * (s->k - g)) ? s->fit_run + 1 : 0;   // the next shorter hold: k − 1, or k − kgran
+    if (s->fit_run >= FSTEP_RUN && s->since >= s->hold && !s->trial) { s->k -= g; if (s->k < kmin) s->k = kmin; s->downs++; s->trial = FSTEP_RUN; s->fit_run = 0; }
     else if ((slow || nvn_fstep_same(s)) && s->k > kmin && s->since >= s->hold && !s->trial) {   // probe: straight to kmin, so the controller sees the whole deadline
         s->k = kmin; s->downs++; s->probes++; s->trial = FSTEP_RUN; s->probe = 1; s->grace = FSTEP_GRACE; s->fit_run = s->late_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;
     }

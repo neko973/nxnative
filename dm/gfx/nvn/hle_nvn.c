@@ -2203,7 +2203,7 @@ static void t120_tick(void) {
     static int win = -1, link_env = -1, was = -1;
     if (win < 0) { win = mtl_display_hz() != 0; link_env = getenv("DM_PRESENT_LINK") != NULL; }
     int ok = !win || front_screen_max_fps() >= 120;
-    if (ok != was) { LOG("[nvn] %s: %s", fs_t120() == 2 ? "60 fps in ticks" : "40 fps", ok ? "the screen shows 120 Hz, steps of 1/120 s on the 120 Hz link" : "the screen is below 120 Hz: 30 fps on the 60 Hz link"); was = ok; }
+    if (ok != was) { LOG("[nvn] %s: %s", fs_t120() == 2 ? "60 fps in ticks" : "40 fps", ok ? "the screen shows 120 Hz, steps of 1/120 s on the 120 Hz link" : fs_t120() == 2 ? "the screen is below 120 Hz: 60 fps (hold 2) or 30 (hold 4), no 40" : "the screen is below 120 Hz: 30 fps on the 60 Hz link"); was = ok; }
     atomic_store(&g_t120_ok, ok);
     if (!link_env) mtl_link_mode_set(ok ? 2 : 1);
 }
@@ -2223,7 +2223,9 @@ static int fps_step_cap(void) {
     // Movies and a 30 fps target still need thermal samples: heat must reset the
     // calm interval, and cooling during those caps counts towards recovery.
     int thermal = thermal_capped();
-    if (fs_t120()) return dm_movie_playing() || t <= 30 || thermal || !atomic_load(&g_t120_ok) ? 30 : fs_t120() == 2 ? 60 : 40;
+    // A screen below 120 Hz cannot show 40 fps evenly, so the 40 fps target runs at 30 there. 60 fps in ticks keeps its 60: the cap was 30 for it as well, so Ocarina of Time
+    // ran at a fixed 30 fps on every 60 Hz screen (a MacBook Air, an iMac, most external screens), whatever the Mac could do. Its holds there are 2 and 4 ticks (fstep_tick: kgran)
+    if (fs_t120()) return dm_movie_playing() || t <= 30 || thermal ? 30 : fs_t120() == 2 ? 60 : atomic_load(&g_t120_ok) ? 40 : 30;
     return dm_movie_playing() || t <= 30 || thermal ? 30 : 60;   // a movie: its player takes a picture per game frame, paced for the Switch's 30 (hle_movie.c)
 }
 static int fstep_on(void) { return fps_step_cap() != 0; }   // the host decides the steps in whole vsyncs
@@ -2435,6 +2437,7 @@ static void fstep_tick(const win_t *o, int c) {
     g_fs.fit_slack = fs_t120() ? g_fs.late_tol / 2 : 0;   // ticks mode: back to the shorter hold when the cost is within 1.7 ms of it (18.3 ms for 60 fps)
     g_fs.hold_cap = fs_t120() && g_fs.k <= 3 ? 3600 : 0;   // ticks mode: after failed trials for 60 fps the next one waits up to 60 s (1, 4, 16, 60 s), not 8; from 30 fps the 8 s stay
     g_fs.kcap = fs_t120() ? 6 : 0;   // 40 fps: steps up to 6 ticks (3 vsyncs, as in whole vsyncs), so hold 4 can still pay back
+    g_fs.kgran = fs_t120() == 2 && !atomic_load(&g_t120_ok) ? 2 : 0;   // 60 fps in ticks on a screen below 120 Hz: holds of whole vsyncs only (2 or 4 ticks; 3 is 40 fps)
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + (fs_t120() ? 0x2c : 0x20)), (uint32_t)n, __ATOMIC_RELAXED);   // 40 fps: the step in ticks of 1/120 s (the stub reads +0x2c first)
     atomic_store(&g_fs_k, g_fs.k);

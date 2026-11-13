@@ -95,7 +95,11 @@ static void screen_match_apply(void) {   // main thread: on a new frame rate, on
     NSScreen *scr = g_win.screen; int want = g_match_want, full = (g_win.styleMask & NSWindowStyleMaskFullScreen) != 0;
     CGDirectDisplayID id = scr ? [scr.deviceDescription[@"NSScreenNumber"] unsignedIntValue] : kCGNullDirectDisplay;
     if (g_match_orig && (!full || id != g_match_id)) screen_match_restore(id == g_match_id);
-    if (off || !full || want <= 0 || !scr) return;
+    // Test: DM_SCREEN_HZ=<rate> switches the screen to a fixed-rate mode of its size at that rate in fullscreen, whatever the frame rate and DM_SCREEN_MATCH say: a ProMotion
+    // screen at a real 60 Hz, to see what a MacBook Air or an external 60 Hz screen shows
+    static int force = -1; if (force < 0) { const char *e = getenv("DM_SCREEN_HZ"); force = e ? atoi(e) : 0; if (force < 0) force = 0; if (force) LOG("front end: the screen goes to %d Hz in fullscreen (DM_SCREEN_HZ, a test)", force); }
+    if (force) want = force;
+    if ((off && !force) || !full || want <= 0 || !scr) return;
     CGDisplayModeRef cur = CGDisplayCopyDisplayMode(id);
     if (!cur) return;
     double hz = mode_hz(cur);
@@ -114,6 +118,7 @@ static void screen_match_apply(void) {   // main thread: on a new frame rate, on
         if (CGDisplayModeGetWidth(m) != w || CGDisplayModeGetHeight(m) != h || CGDisplayModeGetPixelWidth(m) != pw || CGDisplayModeGetPixelHeight(m) != ph || !CGDisplayModeIsUsableForDesktopGUI(m)) continue;
         // on a variable-refresh screen only a fixed-rate mode: not the current one, nor one at its rate (the variable mode at the screen's top rate)
         if (vrr && (CGDisplayModeGetIODisplayModeID(m) == CGDisplayModeGetIODisplayModeID(cur) || (hz > 0 && fabs(r - hz) < 0.5))) continue;
+        if (force && fabs(r - force) >= 0.5) continue;   // the test: that rate alone
         if (hz_multiple(r, want) && r > pick_hz) { pick = m; pick_hz = r; }
     }
     if (!pick && vrr && (hz <= 0 || hz_multiple(hz, want))) LOG("front end: variable-refresh screen at %.0f Hz has no fixed-rate mode of this size at a multiple of %d Hz: it keeps its rate", hz, want);

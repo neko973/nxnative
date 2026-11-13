@@ -360,6 +360,25 @@ int main(void) {
             check(first_len == want[c] && m.s.k == 2 && m.s.failed == 1, b);
         }
     }
+    {   // 60 fps in ticks of 1/120 s on a 60 Hz screen (hle_nvn.c: kmin 2, kmax 4, kgran 2): the hold is 2 (60 fps) or 4 (30), never 3, which such a screen cannot show evenly.
+        // The cap there was 30, so Ocarina of Time ran at a fixed 30 fps on every screen below 120 Hz
+        sim m = {0}; m.s.per_vsync = 2; m.s.kcap = 6; m.s.kgran = 2; m.s.late_tol = m.s.up_tol = 0.4; m.s.fit_slack = 0.2;
+        int three = 0;
+        run(&m, 240, 1.3, 2, 4, 0); check(m.s.k == 2 && m.s.ups == 0, "60 Hz screen, ticks: frames of 10.8 ms hold 60 (hold 2)");
+        for (int i = 0; i < 600; i++) { run(&m, 1, 2.9, 2, 4, 0); three += m.s.k == 3; }   // 24 ms frames: 40 fps on a 120 Hz screen
+        snprintf(b, sizeof b, "  frames of 24 ms step to 30 (hold 4), not to 40 (k %d, frames at hold 3: %d)", m.s.k, three);
+        check(m.s.k == 4 && !three, b);
+        for (int i = 0; i < 2400; i++) { run(&m, 1, 1.3, 2, 4, 0); three += m.s.k == 3; }
+        snprintf(b, sizeof b, "  frames that fit again return to 60 without a stop at 40 (k %d, frames at hold 3: %d, downs %llu)", m.s.k, three, (unsigned long long)m.s.downs);
+        check(m.s.k == 2 && !three && m.s.downs >= 1, b);
+        snprintf(b, sizeof b, "  game time %.0f against real time %.0f ticks (debt %.2f)", m.game, m.real, m.s.debt);
+        check(m.real - m.game - m.s.debt > -2.01 && m.real - m.game - m.s.debt < 2.01, b);
+        sim w = {0}; w.s.per_vsync = 2; w.s.kcap = 6; w.s.late_tol = w.s.up_tol = 0.4; w.s.fit_slack = 0.2;   // the window moves from a 120 Hz screen to a 60 Hz one at 40 fps
+        run(&w, 240, 1.3, 2, 4, 0); run(&w, 300, 2.9, 2, 4, 0); check(w.s.k == 3, "120 Hz screen, ticks: frames of 24 ms hold 40 (hold 3)");
+        w.s.kgran = 2; run(&w, 1, 2.9, 2, 4, 0); check(w.s.k == 4, "  moved to a 60 Hz screen: hold 4 at once");
+        sim e = {0}; e.s.per_vsync = 2; e.s.kcap = 6; e.s.late_tol = e.s.up_tol = 0.4; e.s.fit_slack = 0.2;   // kgran 0: as before
+        run(&e, 240, 1.3, 2, 4, 0); run(&e, 300, 2.9, 2, 4, 0); run(&e, 300, 3.9, 2, 4, 0); check(e.s.k == 4, "120 Hz screen, ticks: 32 ms frames hold 30 (hold 4), every hold in use");
+    }
     printf("== %d checks, %d failed ==\n", checks, fail);
     return fail != 0;
 }
