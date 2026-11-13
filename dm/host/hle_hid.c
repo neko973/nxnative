@@ -517,6 +517,13 @@ static void fill_joy(NpadState *s, npad_ref r) {
         b |= atomic_load(&g_joy_btn[r.pad][side]) | atomic_exchange(&g_joy_latch[r.pad][side], 0);
         uint64_t v = atomic_load(&g_joy_axes[r.pad][side]); a[2 * side] = ax(v, 0); a[2 * side + 1] = ax(v, 1);
     }
+    if (r.pad == 0 && r.kind == KIND_DUAL) {   // player 1's keyboard / touch and scripted input (DM_KEYS, DM_CTL) play beside a pair of Joy-Cons as beside any other controller
+        keys_sync();
+        b |= atomic_load(&g_btn) | atomic_exchange(&g_latch, 0) | atomic_load(&g_sc_btn) | atomic_exchange(&g_sc_latch, 0);
+        uint64_t k = atomic_load(&g_axes), c = atomic_load(&g_sc_axes); for (int i = 0; i < 4; i++) a[i] = pick(pick(a[i], ax(k, i)), ax(c, i));
+        b &= 0x0f00ffffull;
+    }
+    if (atomic_load(&g_hold)) { b = 0; memset(a, 0, sizeof a); }   // an applet is in front: the game reads nothing (the latches were taken all the same)
     s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
     s->buttons = (b & 0x0f00ffffull) | stick_dirs(a);
     s->attributes = ATTR_CONNECTED | (left ? ATTR_LEFT_CONN : 0) | (right ? ATTR_RIGHT_CONN : 0);

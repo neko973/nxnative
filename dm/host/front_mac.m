@@ -209,6 +209,12 @@ static int g_press_to_join;   // DM_PAD_PRESS_TO_JOIN=1, below pad_read
 static int pad_join(const void *owner, const char *name);
 static const char *pad_name(GCController *c);
 static void pro_players_changed(GCController *gone);
+// A left and a right Joy-Con of the first Switch are one controller to GameController, "Joy-Con (L/R)". The game is shown Joy-Cons for it (dm_joy_attach: a dual npad where the
+// game supports one, with each Joy-Con's own buttons, stick and sensor, motion_joycon_mac.h) and a Pro Controller for every other controller. DM_PAD_JOYCON=0 shows the pair
+// as a Pro Controller too. Not with DM_PAD_MERGE, where player 1 is every controller at once
+static int g_joycon_style = 1;
+static int pad_is_joycons(GCController *c) { return g_joycon_style && !g_merge && [c.productCategory containsString:@"Joy-Con (L/R)"]; }
+enum { JOY_LEFT_BTNS = DM_BTN_L | DM_BTN_ZL | DM_BTN_MINUS | DM_BTN_LS | DM_BTN_LEFT | DM_BTN_UP | DM_BTN_RIGHT | DM_BTN_DOWN };   // the left Joy-Con's; the rest are the right one's
 static void pad_read(GCExtendedGamepad *g) {
     if (!g_input_on) return;
     hq_poll(); if (hq_blocks_input(g_hq.phase)) return;
@@ -222,12 +228,14 @@ static void pad_read(GCExtendedGamepad *g) {
     #undef K
     if (p < 0) {   // DM_PAD_PRESS_TO_JOIN=1: it joins at its first button
         GCController *c = g.controller; if (!m || (p = pad_join((__bridge const void *)c, pad_name(c))) < 0) return;
-        g_held[p] = c; dm_motion_attach(c, p); pro_players_changed(nil);
+        g_held[p] = c; dm_motion_attach(c, p); if (pad_is_joycons(c)) dm_joy_attach(p, 3); pro_players_changed(nil);
     }
     if (cp_poll()) return;   // the controller applet's prompt has the controllers (front_ctrl_support)
     if (g_merge_s2_rumble && m) merge_rumble_to_s2(0);   // DM_PAD_MERGE: a button on this controller takes player 1's rumble back from a Switch 2 pad
     dm_haptics_apple_controller(p, g.controller);
-    pad_set(p, m, pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value));
+    int32_t lx = pad_axis(g.leftThumbstick.xAxis.value), ly = pad_axis(g.leftThumbstick.yAxis.value), rx = pad_axis(g.rightThumbstick.xAxis.value), ry = pad_axis(g.rightThumbstick.yAxis.value);
+    pad_set(p, m, lx, ly, rx, ry);
+    if (pad_is_joycons(g.controller)) { dm_joy_set(p, 0, m & JOY_LEFT_BTNS, lx, ly); dm_joy_set(p, 1, m & ~(uint64_t)JOY_LEFT_BTNS, rx, ry); }
 }
 // Home and Capture: without this macOS takes them as system gestures (Home opens the Games app). Capture has no function in the host, Home quits when it is held (hq_poll).
 // macOS 27 respects the claim when the Home button setting for apps lets the app decide (hq_log_setting names it in the log)
@@ -285,6 +293,7 @@ static void pads_changed(GCController *gone) {
         npad_name(p, nb, sizeof nb); LOG("controller '%s' disconnected: player %d (npad %s) is free", pad_name(g_held[p]), p + 1, nb);
         g_held[p].extendedGamepad.valueChangedHandler = nil;
         dm_motion_detach(g_held[p], p);
+        if (pad_is_joycons(g_held[p])) dm_joy_attach(p, 0);   // a Pro-style pad again for whichever controller takes the player next
         dm_haptics_apple_controller(p, nil);
         pad_slot_free(&g_slots, (__bridge const void *)g_held[p]); g_held[p] = nil;
         dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
@@ -302,7 +311,9 @@ static void pads_changed(GCController *gone) {
         g_held[p] = c; pad_keep_system_buttons(c);
         c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
         dm_motion_attach(c, p);
-        npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s)%s", pad_name(c), p + 1, nb, c.motion.hasRotationRate ? ", with motion (gyro)" : "");
+        if (pad_is_joycons(c)) dm_joy_attach(p, 3);
+        npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s)%s%s", pad_name(c), p + 1, nb, c.motion.hasRotationRate ? ", with motion (gyro)" : "",
+                                         pad_is_joycons(c) ? ", shown to the game as Joy-Cons" : "");
         pad_read(c.extendedGamepad);
     }
     hidpad_twins_take(gone);   // the pads of a model GameController lists fewer of, a player each
@@ -326,7 +337,7 @@ static int g_mouse_down;   // the mouse holds the touch (DmGameView)
 // Nothing the controllers pressed stays pressed (focus lost, the Home quit prompt open)
 static void pads_release(void) {
     if (g_merge) { if (merge_pads_left(nil)) dm_pad_set(0, 0, 0, 0, 0); return; }
-    for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
+    for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) { dm_pad_set_player(p, 0, 0, 0, 0, 0); if (pad_is_joycons(g_held[p])) { dm_joy_set(p, 0, 0, 0, 0); dm_joy_set(p, 1, 0, 0, 0); } }
     for (hid_pad *d = g_hidpads; d; d = d->next) { int p = pad_slot_of(&g_slots, d); if (p >= 0) dm_pad_set_player(p, 0, 0, 0, 0, 0); }
     for (s2_pad *d = dm_switch2_pads(); d; d = d->next) { int p = s2pad_player(d); if (p >= 0) { dm_pad_set_player(p, 0, 0, 0, 0, 0); dm_joy_set(p, 0, 0, 0, 0); dm_joy_set(p, 1, 0, 0, 0); } }
 }
@@ -605,6 +616,7 @@ static void pads_start(void) {
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
     e = getenv("DM_KBD_PLAYER"); g_kbd_own = !g_merge && e && !strcmp(e, "own");
     e = getenv("DM_PAD_PRESS_TO_JOIN"); g_press_to_join = !g_merge && e && atoi(e);
+    e = getenv("DM_PAD_JOYCON"); g_joycon_style = !(e && !atoi(e));
     static const char kbd = 0;
     if (g_kbd_own) pad_slot_take(&g_slots, &kbd, "keyboard");   // holds player 1 for good
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_kbd_own ? "the keyboard is player 1, each controller a player of its own from player 2 on (DM_KBD_PLAYER=own)"

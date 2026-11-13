@@ -7,8 +7,10 @@
 // Gyro offsets: at rest a Joy-Con's raw rates are a few degrees per second off zero (measured: 2.0, -3.6, -1.5 on a right one), which a game that aims by the rates shows as a
 // slow creep. The console subtracts the factory calibration, so the host reads it first: subcommand 0x10 (SPI read) of 24 bytes at 0x6020, whose third triple is the gyro's
 // origin, answered in an input report 0x21 (data from byte 20); the sensor is asked for once that answer is in, or after half a second without one (then no offsets).
-// Routing: GameController shows a left and a right Joy-Con as one controller with no HID identity, so only one such controller with one right Joy-Con is paired without
-// guessing (DM_MOTION_JOYCON_SIDE=L: one left); its sensor is that player's six-axis sensor (dm_motion_set_hid). A single Joy-Con held sideways is not read.
+// Routing: GameController shows a left and a right Joy-Con as one controller with no HID identity, so only one such controller with one Joy-Con of a side is paired
+// without guessing. Each Joy-Con's sensor is its own to the npad layer (dm_motion_set_joy: the two sensors of a dual npad, front_mac.m shows the pair as Joy-Cons), and the
+// right one's is also the player's single sensor (dm_motion_set_hid; DM_MOTION_JOYCON_SIDE=L: the left one's) for a game that reads the pair as one controller.
+// A single Joy-Con held sideways is not read.
 // The sensor is switched off again when the game loses the input (and so when it quits in the ordinary way). DM_MOTION=0 or DM_MOTION_HID=0 turns all of this off.
 // All callbacks run on the main run loop, as motion_pro_mac.h's.
 #pragma once
@@ -53,11 +55,13 @@ static inline void jc_motion_origin(pro_motion_sample *s, const int16_t origin[3
 #import <GameController/GCSyntheticDeviceKeys.h>
 #include "dm_input.h"
 #include <stdlib.h>
+
 typedef struct jc_device { IOHIDDeviceRef hid; int pid, empty, asked, said, cal; int16_t origin[3]; uint8_t seq, report[512]; pro_motion motion; struct jc_device *next; } jc_device;
 static IOHIDManagerRef g_jc_manager;
-static jc_device *g_jc_devices, *g_jc_bound;
-static int g_jc_player = -1, g_jc_active = 1, g_jc_controllers, g_jc_slot = -1, g_jc_side = JC_PID_RIGHT;
+static jc_device *g_jc_devices, *g_jc_bound[2];   // bound: the left (0) and the right (1) Joy-Con of the one pair
+static int g_jc_player = -1, g_jc_active = 1, g_jc_controllers, g_jc_slot = -1, g_jc_single = 1;   // single: the side whose sensor is also the player's one sensor
 static void (*g_jc_changed)(void);
+static int jc_side(const jc_device *d) { return d->pid == JC_PID_RIGHT; }
 
 static void jc_imu(jc_device *d, int on) {
     uint8_t o[49]; jc_motion_request(o, d->seq++, on);
@@ -67,33 +71,38 @@ static void jc_imu(jc_device *d, int on) {
     if (r != kIOReturnSuccess && !d->said) { d->said = 1; LOG("[RED] Joy-Con raw motion: a request to the Joy-Con failed (0x%x)", r); }
 }
 static void jc_begin(jc_device *d) { d->motion = (pro_motion){0}; d->asked = 0; jc_imu(d, d->cal ? 1 : -1); }   // the calibration first, once
+static void jc_clear(int player, int side) { if (player < 0) return; dm_motion_clear_joy(player, side); if (side == g_jc_single || !g_jc_bound[g_jc_single]) dm_motion_clear_hid(player); }
 static void jc_route(void) {
-    int n = 0; jc_device *one = NULL;
-    for (jc_device *d = g_jc_devices; d; d = d->next) if (d->pid == g_jc_side) { n++; one = d; }
-    int p = jc_motion_player(n, g_jc_controllers, g_jc_slot);
-    jc_device *d = p >= 0 ? one : NULL;
-    if (d == g_jc_bound && p == g_jc_player) return;
-    if (g_jc_player >= 0) dm_motion_clear_hid(g_jc_player);
-    if (g_jc_bound && g_jc_bound != d && g_jc_bound->motion.seen) jc_imu(g_jc_bound, 0);
-    g_jc_bound = d; g_jc_player = p;
-    if (!d) return;
-    LOG("[hid] Joy-Con raw motion: player %d, the %s Joy-Con's sensor (report 0x30, switched on by the host)", p + 1, d->pid == JC_PID_RIGHT ? "right" : "left");
-    if (g_jc_active) jc_begin(d);
+    jc_device *want[2] = {NULL, NULL}; int n[2] = {0, 0};
+    for (jc_device *d = g_jc_devices; d; d = d->next) if (d->pid == JC_PID_LEFT || d->pid == JC_PID_RIGHT) { n[jc_side(d)]++; want[jc_side(d)] = d; }
+    int p = -1;
+    for (int side = 0; side < 2; side++) { int q = jc_motion_player(n[side], g_jc_controllers, g_jc_slot); if (q < 0) want[side] = NULL; else p = q; }
+    for (int side = 0; side < 2; side++) {
+        jc_device *d = want[side], *was = g_jc_bound[side];
+        if (d == was && (p == g_jc_player || !d)) continue;
+        jc_clear(g_jc_player, side);
+        if (was && was != d && was->motion.seen) jc_imu(was, 0);
+        g_jc_bound[side] = d;
+        if (!d) continue;
+        LOG("[hid] Joy-Con raw motion: player %d, the %s Joy-Con's sensor (report 0x30, switched on by the host)", p + 1, side ? "right" : "left");
+        if (g_jc_active) jc_begin(d);
+    }
+    g_jc_player = p;
 }
 static void dm_motion_joycon_players(int controllers, int slot) { g_jc_controllers = controllers; g_jc_slot = slot; jc_route(); }
 static void dm_motion_joycon_active(int active) {
     if (active == g_jc_active) return;
     g_jc_active = active;
-    if (!g_jc_bound) return;
-    if (active) jc_begin(g_jc_bound); else { g_jc_bound->motion = (pro_motion){0}; jc_imu(g_jc_bound, 0); }
-    if (!active && g_jc_player >= 0) dm_motion_clear_hid(g_jc_player);
+    for (int side = 0; side < 2; side++) if (g_jc_bound[side]) {
+        if (active) jc_begin(g_jc_bound[side]); else { g_jc_bound[side]->motion = (pro_motion){0}; jc_imu(g_jc_bound[side], 0); jc_clear(g_jc_player, side); }
+    }
 }
 static void jc_report(void *ctx, IOReturn result, void *sender, IOHIDReportType type, uint32_t report_id, uint8_t *r, CFIndex len) {
     (void)sender;
-    jc_device *d = ctx;
-    if (result != kIOReturnSuccess || type != kIOHIDReportTypeInput || len < 49 || !g_jc_active || d != g_jc_bound) return;
+    jc_device *d = ctx; int side = jc_side(d);
+    if (result != kIOReturnSuccess || type != kIOHIDReportTypeInput || len < 49 || !g_jc_active || d != g_jc_bound[side]) return;
     if (report_id == 0x21 && !d->cal && jc_motion_cal(r, (size_t)len, d->origin)) {
-        d->cal = 1; LOG("[hid] Joy-Con raw motion: gyro origin %d %d %d counts (factory calibration)", d->origin[0], d->origin[1], d->origin[2]);
+        d->cal = 1; LOG("[hid] Joy-Con raw motion: %s Joy-Con, gyro origin %d %d %d counts (factory calibration)", side ? "right" : "left", d->origin[0], d->origin[1], d->origin[2]);
         if (!d->asked) jc_imu(d, 1);
         return;
     }
@@ -102,13 +111,19 @@ static void jc_report(void *ctx, IOReturn result, void *sender, IOHIDReportType 
     int was = d->motion.live, n = pro_motion_decode(&d->motion, r, (size_t)len, now_ns(), s);
     if (!d->motion.live) {   // no data yet: the request was lost, or macOS set the Joy-Con up again after it
         if (++d->empty < (d->asked ? JC_ASK_AFTER : JC_CAL_WAIT)) return;
-        if (!d->asked && !d->cal) LOG("[hid] Joy-Con raw motion: no calibration answer; its gyro is used without offsets");
+        if (!d->asked && !d->cal) LOG("[hid] Joy-Con raw motion: no calibration answer from the %s Joy-Con; its gyro is used without offsets", side ? "right" : "left");
         if (d->asked < JC_ASK_MAX) jc_imu(d, 1);
-        else if (d->asked == JC_ASK_MAX) { d->asked++; d->empty = 0; LOG("[RED] Joy-Con raw motion: no sensor data after %d requests; this Joy-Con has no motion", JC_ASK_MAX); }
+        else if (d->asked == JC_ASK_MAX) { d->asked++; d->empty = 0; LOG("[RED] Joy-Con raw motion: no sensor data after %d requests; the %s Joy-Con has no motion", JC_ASK_MAX, side ? "right" : "left"); }
         return;
     }
-    if (!was) LOG("[hid] Joy-Con raw motion: sensor data arriving (player %d)", g_jc_player + 1);
-    for (int i = 0; i < n; i++) { if (d->cal) jc_motion_origin(&s[i], d->origin); jc_motion_side(&s[i], d->pid); dm_motion_set_hid(g_jc_player, s[i].acc, s[i].rot, s[i].ns); }
+    if (!was) LOG("[hid] Joy-Con raw motion: sensor data arriving from the %s Joy-Con (player %d)", side ? "right" : "left", g_jc_player + 1);
+    int single = side == g_jc_single || !g_jc_bound[g_jc_single];
+    for (int i = 0; i < n; i++) {
+        if (d->cal) jc_motion_origin(&s[i], d->origin);
+        jc_motion_side(&s[i], d->pid);
+        dm_motion_set_joy(g_jc_player, side, s[i].acc, s[i].rot, s[i].ns);
+        if (single) dm_motion_set_hid(g_jc_player, s[i].acc, s[i].rot, s[i].ns);
+    }
 }
 static void jc_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef hid) {
     (void)ctx; (void)sender;
@@ -128,14 +143,14 @@ static void jc_removed(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef 
     if (!*link) return;
     jc_device *d = *link; *link = d->next;
     IOHIDDeviceRegisterInputReportCallback(hid, d->report, sizeof d->report, NULL, NULL);   // while its buffer and context still exist
-    if (d == g_jc_bound) { g_jc_bound = NULL; if (g_jc_player >= 0) dm_motion_clear_hid(g_jc_player); g_jc_player = -1; }
+    for (int side = 0; side < 2; side++) if (d == g_jc_bound[side]) { jc_clear(g_jc_player, side); g_jc_bound[side] = NULL; }
     if (g_jc_changed) g_jc_changed(); else jc_route();
     CFRelease(d->hid); free(d);
 }
 static void dm_motion_joycon_start(void (*changed)(void)) {
     const char *e = getenv("DM_MOTION"); if (e && !atoi(e)) return;
     e = getenv("DM_MOTION_HID"); if (e && !atoi(e)) return;
-    e = getenv("DM_MOTION_JOYCON_SIDE"); if (e && (*e == 'L' || *e == 'l')) g_jc_side = JC_PID_LEFT;
+    e = getenv("DM_MOTION_JOYCON_SIDE"); if (e && (*e == 'L' || *e == 'l')) g_jc_single = 0;
     g_jc_changed = changed;
     g_jc_manager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone); if (!g_jc_manager) return;
     IOHIDManagerSetDeviceMatchingMultiple(g_jc_manager, (__bridge CFArrayRef)@[@{@kIOHIDVendorIDKey: @0x057E, @kIOHIDProductIDKey: @(JC_PID_LEFT)},
