@@ -12,6 +12,17 @@
 #                     build on another disk
 #   --check           only check this Mac and say what is missing; build nothing
 #
+# To update an app this script built earlier, without the dump and in a few minutes instead of an hour and a half:
+#
+#   git pull
+#   ./install-ocarina-mac.sh --update "/path/to/The Legend of Zelda Ocarina of Time.app"
+#
+# It builds the new host and launcher from this folder and puts them into the app with the new settings list, the
+# built-in settings and the pipeline list, then signs the app again. What it replaces is kept in a folder beside the app
+# ("<app name> before update <date>"). The game files, the shaders and your saves are not touched. It stops, and says
+# so, when the app's shaders were built for another version of the shader tools than this folder's: then run the
+# full install again.
+#
 # What it does: checks the Mac (Apple silicon, Xcode, the Metal compiler, Homebrew, free disk space), installs the
 # two Homebrew packages and the Python modules the build needs (the modules go into a folder of their own here,
 # .oot-venv, not into your system), then runs the project's packing script. The build takes 1 h 15 min to 1 h 45 min
@@ -27,7 +38,7 @@ bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 die()  { red "STOPPED: $1"; shift; for l in "$@"; do printf '  %s\n' "$l" >&2; done; exit 1; }
 
-DUMP=""; YES=0; DAMAGED=0; CHECK=0; OUT=""; WORKDIR=""
+DUMP=""; YES=0; DAMAGED=0; CHECK=0; OUT=""; WORKDIR=""; UPDATE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --yes|-y) YES=1 ;;
@@ -35,19 +46,112 @@ while [ $# -gt 0 ]; do
     --check) CHECK=1 ;;
     --out|-o) shift; OUT="${1:-}" ;;
     --work-dir) shift; WORKDIR="${1:-}" ;;
+    --update) shift; UPDATE="${1:-}"; [ -n "$UPDATE" ] || die "--update needs the app's path" "Usage: ./install-ocarina-mac.sh --update \"/path/to/the game.app\"" ;;
     -h|--help) sed -n '2,/^set -u/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown option $1" "Run ./install-ocarina-mac.sh --help" ;;
     *) [ -z "$DUMP" ] && DUMP="$1" || die "more than one path given: \"$DUMP\" and \"$1\"" "Put quotes around a path that has spaces in it." ;;
   esac
   shift
 done
-[ $CHECK = 1 ] || [ -n "$DUMP" ] || die "no dump given" "Usage: ./install-ocarina-mac.sh /path/to/OcarinaOfTime.nup" "(your own dump of the game: a .nup file or a dump folder)"
+[ $CHECK = 1 ] || [ -n "$UPDATE" ] || [ -n "$DUMP" ] || die "no dump given" "Usage: ./install-ocarina-mac.sh /path/to/OcarinaOfTime.nup" "(your own dump of the game: a .nup file or a dump folder)"
+UPDATE="${UPDATE%/}"
+if [ -n "$UPDATE" ]; then
+  [ -z "$DUMP" ] || die "--update takes the app alone, not a dump as well" "Usage: ./install-ocarina-mac.sh --update \"/path/to/the game.app\""
+  [ -d "$UPDATE/Contents/Resources/dm" ] && [ -f "$UPDATE/Contents/Info.plist" ] || die "\"$UPDATE\" is not an app this script built" "Give the path of the .app (drag it from Finder into the Terminal window)."
+fi
 [ -z "$DUMP" ] || [ -e "$DUMP" ] || die "there is nothing at \"$DUMP\"" "Give the path of your .nup file or dump folder. Drag it from Finder into the Terminal window to get its path."
 
 ask() {   # ask "question": yes with --yes, else asks; no terminal = no
   [ $YES = 1 ] && return 0
   [ -t 0 ] || return 1
   printf '%s [y/N] ' "$1"; read -r a; case "$a" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
+
+# --update: the new host, settings list, built-in settings and pipeline list into an app built earlier. Nothing here needs the dump: the host is built from this folder alone, and the
+# settings list is made from the rewritten modules' tables the app carries. The app's shader library must be of a chain this folder's host can load: its own, or one of UPDATE_CHAINS, the
+# chains whose libraries hold the same shaders (e87f5802f90a: the same translator sources as 3d08bd9723b0, built with another .NET runtime). A change to the shader tools or to the game's
+# patches must empty that list: such an update needs the full install.
+UPDATE_CHAINS="e87f5802f90a"
+update_app() {
+  APP="$UPDATE"; DM="$APP/Contents/Resources/dm"; PL="$APP/Contents/Info.plist"; CH="$REPO/dm/gfx/nvn/dmsh_chain.h"
+  step "3/4  The app"
+  TID=$(/usr/libexec/PlistBuddy -c "Print :DMTitleID" "$PL" 2>/dev/null || true)
+  [ "$TID" = "$TITLE" ] || die "\"$APP\" is not Ocarina of Time for Switch 2 (title ID ${TID:-none}, expected $TITLE)"
+  [ -f "$DM/main.fixups.tsv" ] && [ -f "$APP/Contents/MacOS/dmhost" ] || die "the app lacks files this script's builds have (Contents/MacOS/dmhost, Contents/Resources/dm/main.fixups.tsv)" "Run the full install instead."
+  if pgrep -f "$APP/Contents/MacOS/" >/dev/null 2>&1; then die "the game is running" "Quit it, then run this again."; fi
+  [ -w "$APP/Contents/MacOS" ] && [ -w "$DM" ] || die "cannot write into \"$APP\"" "Check the app's permissions, or copy it to a folder of your own."
+  WANT=$(sed -n 's/^#define DMSH_CHAIN "\(.*\)"$/\1/p' "$CH")
+  [ -n "$WANT" ] || die "no shader chain version in dm/gfx/nvn/dmsh_chain.h"
+  HAVE=""; for f in "$APP/Contents/Resources/msl"/b-*; do [ -e "$f" ] || continue; n=$(basename "$f"); n=${n#b-}; HAVE="$HAVE ${n%.img}"; done
+  USE=""
+  case " $HAVE " in *" $WANT "*) USE="$WANT" ;; esac
+  if [ -z "$USE" ]; then for c in $UPDATE_CHAINS; do case " $HAVE " in *" $c "*) USE="$c"; break ;; esac; done; fi
+  [ -n "$USE" ] || die "the app's shaders (chain${HAVE:- none}) were built for another version of the shader tools than this folder's ($WANT)" "This update needs the full install:  ./install-ocarina-mac.sh /path/to/your/dump.nup" "(with the build's work folder still there, the steps that did not change are reused)."
+  if [ "$USE" = "$WANT" ]; then echo "The app's shader library: chain $USE"; else echo "The app's shader library: chain $USE (the same shaders as this folder's $WANT; the host is built for it)"; fi
+  SAVED_CH=""
+  restore_chain() { if [ -n "$SAVED_CH" ]; then cp "$SAVED_CH" "$CH" && rm -f "$SAVED_CH"; SAVED_CH=""; fi; }
+  trap restore_chain EXIT INT TERM
+  if [ "$USE" != "$WANT" ]; then
+    SAVED_CH=$(mktemp "${TMPDIR:-/tmp}/dmsh_chain.XXXXXX") && cp "$CH" "$SAVED_CH" || die "cannot keep a copy of dm/gfx/nvn/dmsh_chain.h"
+    sed -i '' "s/^#define DMSH_CHAIN \"$WANT\"\$/#define DMSH_CHAIN \"$USE\"/" "$CH"
+  fi
+
+  step "4/4  Building the host and putting it into the app (a few minutes)"
+  LOG="$REPO/install-ocarina-mac.log"; echo "Log: $LOG"
+  if ! ( cd "$REPO/dm/host" && PATH="$VENV/bin:$PATH" make -s GAME=$TITLE dmhost ) >"$LOG" 2>&1; then
+    restore_chain; tail -20 "$LOG" >&2; die "the host did not build" "The compiler's last lines are above and in $LOG."
+  fi
+  restore_chain; trap - EXIT INT TERM
+  HOST="$REPO/dm/host/dmhost"
+  strings -a "$HOST" | grep -q "$USE" || die "the host that was built is not for chain $USE" "See $LOG."
+  KEEP="${APP%.app} before update $(date +%Y-%m-%d-%H%M)"
+  mkdir -p "$KEEP" || die "cannot make the folder \"$KEEP\""
+  cp -p "$APP/Contents/MacOS/dmhost" "$APP/Contents/MacOS/nxnative" "$PL" "$KEEP/" || die "cannot copy the old host and launcher into \"$KEEP\""
+  for f in launcher.json env.txt pso_manifest.tsv; do [ ! -f "$DM/$f" ] || cp -p "$DM/$f" "$KEEP/"; done
+  LANG_DEF=$(/usr/libexec/PlistBuddy -c "Print :DMLanguage" "$PL" 2>/dev/null || echo en-US)
+  if ! SETTINGS_PLATFORM=mac GFXAPI=nvn DM_LANG="$LANG_DEF" "$VENV/bin/python" "$REPO/dm/games/settings.py" $TITLE "$DM" "" "$KEEP/launcher.new.json" >>"$LOG" 2>&1; then
+    tail -5 "$LOG" >&2; die "the settings list could not be made" "Nothing in the app was changed. See $LOG."
+  fi
+  cp "$HOST" "$APP/Contents/MacOS/dmhost" && chmod 755 "$APP/Contents/MacOS/dmhost" || die "cannot write the host into the app" "The old one is in \"$KEEP\"."
+  mv "$KEEP/launcher.new.json" "$DM/launcher.json"
+  cp "$REPO/dm/games/$TITLE/mac-60fps.env" "$DM/env.txt"
+  cp "$REPO/dm/games/$TITLE/pso_manifest.tsv" "$DM/pso_manifest.tsv"
+  COMMIT=$(git -C "$REPO" rev-parse --short=12 HEAD 2>/dev/null || true)
+  # Info.plist's DMSettings as dm/mac/pack_app.py settings_rules writes it: what the launcher accepts as each setting's saved choice
+  "$VENV/bin/python" -c '
+import json, plistlib, sys
+pl, lj, commit = sys.argv[1:4]
+info = plistlib.load(open(pl, "rb"))
+rules = []
+for s in json.load(open(lj, encoding="utf-8"))["settings"]:
+    if s["kind"] == "range": rules.append({"env": s["env"], "min": float(s["min"]), "max": float(s["max"])})
+    elif s["kind"] == "choice": rules.append({"env": s["env"], "values": [o[0] for o in s["options"]]})
+    elif s["kind"] == "toggle": rules.append({"env": s["env"], "values": [s.get("on", "1"), s.get("off", "0")]})
+info["DMSettings"] = rules
+if commit: info["DMCommit"] = commit
+open(pl, "wb").write(plistlib.dumps(info))
+' "$PL" "$DM/launcher.json" "$COMMIT" || die "the app's Info.plist could not be updated" "Put the old files back from \"$KEEP\"."
+  # The launcher built again (new settings may need it: Game Mode picks the host it starts) and the host under the bundle Game Mode takes (dm/mac/pack_app.py)
+  if ! "$VENV/bin/python" -c '
+import sys
+sys.path[:0] = [sys.argv[1] + "/dm/mac"]
+import pack_app
+print("launcher and Game Mode host:", pack_app.update_launcher(sys.argv[2]))
+' "$REPO" "$APP" >>"$LOG" 2>&1; then
+    tail -8 "$LOG" >&2; die "the launcher could not be built" "Put the old files back from \"$KEEP\" (dmhost and nxnative into Contents/MacOS, Info.plist into Contents, the rest into Contents/Resources/dm). See $LOG."
+  fi
+  echo "Signing the app (it reads the whole game image: two or three minutes) ..."
+  find "$APP" -name '._*' -type f -delete 2>/dev/null
+  codesign --force --sign - "$APP/Contents/Helpers/GameMode.app" >>"$LOG" 2>&1 && codesign --force --sign - "$APP/Contents/MacOS/dmhost" >>"$LOG" 2>&1 && codesign --force --sign - "$APP" >>"$LOG" 2>&1 && codesign --verify "$APP" >>"$LOG" 2>&1 \
+    || die "the app could not be signed" "See $LOG. The old host, settings and Info.plist are in \"$KEEP\"."
+  echo
+  bold "Updated: $APP"
+  echo
+  echo "- The game files, the shaders and your saves were not touched. What was replaced is in"
+  echo "  \"$KEEP\"; delete that folder once the game runs."
+  echo "- The first start may prepare a few more pipelines behind the progress screen (seconds, not minutes)."
+  echo "- New in the settings window: Texture filtering, Texture size and Game Mode (docs/settings.md says what they do)."
 }
 
 step "1/5  This Mac"
@@ -117,6 +221,8 @@ if [ $CHECK = 0 ]; then
   echo "Python modules: ready"
 fi
 
+[ -z "$UPDATE" ] || { update_app; exit 0; }
+
 step "3/5  Disk space"
 WHERE="$REPO"; [ -n "$DUMP" ] && { if [ -d "$DUMP" ]; then WHERE="$DUMP"; else WHERE=$(dirname "$DUMP"); fi; }
 if [ -n "$WORKDIR" ]; then mkdir -p "$WORKDIR" || die "cannot make the work folder $WORKDIR"; WHERE="$WORKDIR"; fi
@@ -155,7 +261,8 @@ if [ "$RC" != 0 ]; then
 fi
 
 step "5/5  Done"
-APP=$(grep -ao '[^ ]*/[^/]*\.app' "$LOG" | tail -1)
+APP=$(sed -n 's/^app: \(.*\.app\)$/\1/p' "$LOG" | tail -1)   # the packer's last line; a path may have spaces
+[ -n "$APP" ] || APP=$(grep -ao '[^ ]*/[^/]*\.app' "$LOG" | tail -1)
 [ -n "$OUT" ] && APP="$OUT"
 bold "The app: ${APP:-next to your dump, named after the game}"
 cat <<EOF

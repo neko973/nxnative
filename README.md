@@ -11,7 +11,15 @@
 > ./install-ocarina-mac.sh /path/to/your/OcarinaOfTime.nup
 > ```
 >
-> **Update to the newest version** (also the fix when the script stops with `the shader translator does not run (exit code -11)`):
+> **Already have the app?** Update it in a few minutes, without the dump (quit the game first). The update of 2026-11-12 fixes the game running at a fixed 30 fps on every screen below 120 Hz (a MacBook Air, an iMac, most external screens):
+>
+> ```
+> cd nxnative
+> git pull
+> ./install-ocarina-mac.sh --update "/path/to/The Legend of Zelda Ocarina of Time.app"
+> ```
+>
+> **No app yet, or the script stopped** (also the fix for `the shader translator does not run (exit code -11)`): update the folder and run the install again.
 >
 > ```
 > cd nxnative

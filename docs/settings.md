@@ -5,7 +5,7 @@ The screen before the game starts shows the settings the game supports. A settin
 - [Tested defaults](#tested-defaults)
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Sharpening](#sharpening), [Texture filtering](#texture-filtering), [Texture size](#texture-size), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
-- [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
+- [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Game Mode](#game-mode), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [In-game menu](#in-game-menu)
 - [TV](#tv)
@@ -239,6 +239,14 @@ flowchart LR
 
 Apple's performance overlay over the game: frame rate, frame and GPU times, memory. Useful to see what a setting changes; leave it off for play.
 
+### Game Mode
+
+Mac only. Lets macOS's Game Mode take the game while it is fullscreen: background tasks get less of the CPU and GPU, and Bluetooth controllers and AirPods are read twice as often. Off by default.
+
+- **What it costs:** on some Macs Game Mode lowers the GPU's clock a minute or two into a fullscreen game, which halves the frame rate ([frame-rate.md](reference/frame-rate.md#macos-game-mode-holds-the-gpu-at-its-lowest-clock): M4 Pro). Ocarina of Time on an M3 Pro held 60 fps through seven minutes with it, at about 1 ms more GPU time a frame.
+- **When to change it:** turn it on for a Bluetooth controller that feels late or when background work makes the game hitch; turn it off if the frame rate falls after a minute or two with the same view.
+- **How it works:** macOS decides Game Mode from the app's `Info.plist` and remembers an app it has treated as a game, so the app carries the game program twice, once in a bundle that Game Mode takes (`Contents/Helpers/GameMode.app`), and this setting picks which one the launcher starts. With it on, the Dock shows a second icon for the game while it runs.
+
 ### Reset to tested defaults
 
 Sets every setting back to the game's tested default; **Play** then forgets your choices, so those defaults apply, and those of later builds too ([Tested defaults](#tested-defaults)). Settings fixed by `Documents/env.txt` stay as the file says.
@@ -311,5 +319,6 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Encode thread | `DM_NVN_ENC_THREAD` | `1`, `0` |
 | Hold frames when late | `DM_FPS_HOLD` | `on`, `off` |
 | Performance HUD | `DM_METAL_HUD` | `1`, `0` |
+| Game Mode | `DM_GAME_MODE` | `1`, `0` |
 
 `DM_LAUNCHER=0` skips the settings screen; the choices you saved there still apply. `DM_SAVED_CHOICES=0` starts with the tested defaults and keeps your saved choices for later. How the settings are listed for each game: [dm/games/settings.tsv](../dm/games/settings.tsv).

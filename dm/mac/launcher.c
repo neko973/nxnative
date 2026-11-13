@@ -218,6 +218,14 @@ int main(int argc, char **argv) {
     struct sigaction sa = {.sa_handler = forward};   // no SA_RESTART: waitpid below sees EINTR and waits again
     sigemptyset(&sa.sa_mask);
     sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL); sigaction(SIGHUP, &sa, NULL);
+    // Game Mode (the settings window's Game Mode, DM_GAME_MODE=1): macOS decides it from the Info.plist of the bundle the process runs from, and remembers a bundle it has once
+    // treated as a game. So the app carries the host twice (pack_app.py game_mode_helper): Contents/MacOS/dmhost under the app's own Info.plist, which says LSSupportsGameMode false,
+    // and Contents/Helpers/GameMode.app/Contents/MacOS/dmhost under one that says true, with a bundle ID of its own. The setting picks which one runs
+    { const char *gm = getenv("DM_GAME_MODE"); char alt[PATH_MAX]; snprintf(alt, sizeof alt, "%s/Helpers/GameMode.app/Contents/MacOS/dmhost", contents);
+      if (gm && !strcmp(gm, "1")) {
+          if (!access(alt, X_OK)) { snprintf(host, sizeof host, "%s", alt); fprintf(stderr, "launcher: Game Mode on (DM_GAME_MODE=1): host %s\n", host); }
+          else fprintf(stderr, "launcher: DM_GAME_MODE=1, but this app has no %s: Game Mode stays off (pack or update the app again)\n", alt);
+      } }
     char *host_argv[] = {host, dm, NULL};
     int err = posix_spawn(&g_child, host, NULL, NULL, host_argv, environ);
     if (err) { fprintf(stderr, "[RED] launcher: cannot start %s: %s\n", host, strerror(err)); return 1; }

@@ -119,7 +119,8 @@ def settings_rules(listed):   # DMSettings: what the launcher accepts as each se
 
 
 def info_plist(a, minos, icon):
-    # LSSupportsGameMode off: macOS's Game Mode holds the GPU at its lowest clock while it is busy (docs/reference/frame-rate.md, macOS Game Mode holds the GPU at its lowest clock)
+    # LSSupportsGameMode off: macOS's Game Mode holds the GPU at its lowest clock while it is busy (docs/reference/frame-rate.md, macOS Game Mode holds the GPU at its lowest clock).
+    # The settings window's Game Mode starts the host from a bundle of its own that says true (game_mode_helper)
     p = {'CFBundleName': a.name, 'CFBundleDisplayName': a.name, 'CFBundleIdentifier': a.bundle_id or f'org.nxnative.{a.title_id.lower()}',
          'CFBundleVersion': a.version or '1.0', 'CFBundleShortVersionString': a.version or '1.0', 'CFBundlePackageType': 'APPL', 'CFBundleExecutable': EXE,
          'CFBundleInfoDictionaryVersion': '6.0', 'LSMinimumSystemVersion': minos, 'LSArchitecturePriority': ['arm64'], 'NSHighResolutionCapable': True,
@@ -132,6 +133,39 @@ def info_plist(a, minos, icon):
         lang = next((s['default'] for s in listed if s['env'] == 'DM_LANG'), None)
         if lang: p['DMLanguage'] = lang   # the Game language row's default: --lang, or the game's first language when it lacks that one (settings.py), with or without the window
     return p
+
+
+GM_HELPER = 'Contents/Helpers/GameMode.app'   # launcher.c starts its host when the settings window's Game Mode is on
+
+
+def game_mode_helper(app):
+    # The host a second time, in a bundle of its own inside the app, whose Info.plist is the app's with LSSupportsGameMode true, the host as its executable and a bundle ID of its
+    # own. macOS decides Game Mode from the Info.plist of the bundle a process runs from and remembers a bundle it has once treated as a game (docs/reference/frame-rate.md), so
+    # a switch needs two bundles: the launcher (launcher.c, DM_GAME_MODE) starts this host or Contents/MacOS/dmhost. The host is a copy (5 MB): the main bundle of a link's
+    # target is the bundle the target lies in
+    app = Path(app); c = app / 'Contents'; h = app / GM_HELPER / 'Contents'
+    shutil.rmtree(app / GM_HELPER, ignore_errors=True)
+    (h / 'MacOS').mkdir(parents=True)
+    shutil.copy(c / 'MacOS/dmhost', h / 'MacOS/dmhost')
+    info = plistlib.loads((c / 'Info.plist').read_bytes())
+    for k in ('DMSettings', 'DMModuleFiles', 'DMSaveSyncChoice'): info.pop(k, None)   # the launcher's own
+    info.update({'CFBundleExecutable': 'dmhost', 'CFBundleIdentifier': info['CFBundleIdentifier'] + '.gamemode', 'LSSupportsGameMode': True})
+    if (c / 'Resources/AppIcon.icns').is_file():
+        (h / 'Resources').mkdir(); shutil.copy(c / 'Resources/AppIcon.icns', h / 'Resources/AppIcon.icns')
+    else: info.pop('CFBundleIconFile', None)
+    (h / 'Info.plist').write_bytes(plistlib.dumps(info)); (h / 'PkgInfo').write_text('APPL????')
+    return app / GM_HELPER
+
+
+def update_launcher(app):
+    # install-ocarina-mac.sh --update: the launcher built again for an app packed earlier, and its Game Mode host (the app's Info.plist and host must be the new ones already)
+    app = Path(app); mac = app / 'Contents/MacOS'
+    clang = Path(run(['xcrun', '--find', 'clang']).strip()).resolve(); swiftc = Path(run(['xcrun', '--find', 'swiftc']).strip())
+    sdk = Path(run(['xcrun', '--sdk', 'macosx', '--show-sdk-path']).strip()).resolve()
+    new = mac / (EXE + '.new')
+    build_launcher(new, min_os(mac / 'dmhost'), clang, swiftc, sdk)
+    new.replace(mac / EXE)
+    return game_mode_helper(app)
 
 
 def source_commit():   # DMCommit: the checkout that packed the app (scripts/bug_report.py reads it), short hash, +dirty with uncommitted changes to tracked files; None outside a checkout
@@ -153,8 +187,8 @@ def strip_detritus(app):   # the "._name" files a copy from or onto an exFAT vol
 
 def sign(app, identity, codesign):   # the inner host first, then the bundle (its resources and the launcher); no --options runtime (see the top)
     strip_detritus(app)   # before codesign reads the bundle, so that a build folder or an output folder on exFAT is not a signing failure
-    host = app / 'Contents/MacOS/dmhost'
-    for target in (host, app):
+    host = app / 'Contents/MacOS/dmhost'; helper = app / GM_HELPER   # nested code before the bundle that holds it
+    for target in ((helper,) if helper.is_dir() else ()) + (host, app):
         try: run([codesign, '--force', '--sign', identity, target])
         except SystemExit as e:
             if not any(s in str(e) for s in ('detritus', '._', 'not signed at all')): raise
@@ -349,6 +383,7 @@ def pack(a):
     if msl_dst.name.startswith('b-'): info['DMChain'] = msl_dst.name[2:]   # the library chain the app carries (a Vulkan or GL game's vk / gl has none)
     (c / 'Info.plist').write_bytes(plistlib.dumps(info))
     (c / 'PkgInfo').write_text('APPL????')
+    game_mode_helper(tmp)   # the host under an Info.plist that lets Game Mode take it (the settings window's Game Mode)
     step(f'signing ({"ad-hoc" if a.sign == "-" else a.sign})'); sign(tmp, a.sign, codesign)
     had_old = out.exists()
     replace_app(tmp, out)

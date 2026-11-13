@@ -55,6 +55,7 @@ DM_GAME	switch	Selects the game profile (a title ID under `dm/games` or `DM_GAME
 DM_GAMES_DIR	path	Profile folders outside the repository, separated by `:`, searched after `dm/games`; the NSP script points it at a provisional or derived profile
 DM_GAMES_FIRST	switch	`=1` searches `DM_GAMES_DIR` before `dm/games`, so a provisional or derived profile wins over the game's own (the NSP script's `--provisional`)
 DM_GAME_ENV	switch	`KEY=VALUE` pairs, separated by spaces, that the game's own `getenv` returns, in place of the profile's `game_env` (`hle_os.c`); any other name goes to the SDK's empty environment
+DM_GAME_MODE	player	`1` has the Mac app's launcher start the host from the bundle macOS's Game Mode takes (`Contents/Helpers/GameMode.app`, whose Info.plist says `LSSupportsGameMode` true); `0` or unset, from the app's own, which says false. The settings window's Game Mode
 DM_GFX_FIXTURE_OUT	test	`=<dir>`: graphics tests write their raw result textures and buffers there
 DM_GLSLC_CAPTURE	path	`=<dir>` saves every GLSLC output the game compiles at run time; `shader_split.py` reads it (default `<version dir>/glslc_capture`)
 DM_GL_CAPTURE	path	`=<dir>`: the GL layer writes every shader source the game compiles (`<key>.vert` / `<key>.frag`) for `gl_shaders.py`; the NSP script uses it to capture run-time shaders
@@ -353,6 +354,7 @@ DM_SCREEN_ASPECT	player	`=<width/height>` (1.3 to 1.77, e.g. `1.43` for the iPho
 DM_SCREEN_ASPECT_SITES	diagnostic	`=<mask>` with DM_SCREEN_ASPECT: which of the profile's layout-size conversion stubs follow the taller layout, one bit each (default all)
 DM_SCREEN_FOV	diagnostic	`off` with DM_SCREEN_ASPECT: the scene keeps the game's vertical angle (narrower sides) instead of 16:9's sides with more above and below
 DM_SCREEN_HUD	diagnostic	`=<edge>,<listed>,<full width>,<full height>[,<tallest>]` with DM_SCREEN_ASPECT: the layout rules' distances and sizes in the 1280x720 space (default 280,100,1270,710,1300)
+DM_SCREEN_HZ	diagnostic	`=<rate>` switches the screen to a fixed-rate mode of its size at that rate in fullscreen, for this app only, whatever the frame rate and `DM_SCREEN_MATCH` say: a ProMotion screen at a real 60 Hz, to see what a MacBook Air or an external 60 Hz screen shows
 DM_SCREEN_MATCH	switch	`0` keeps the screen's refresh rate in fullscreen; by default a Mac screen whose rate is not a multiple of the game's frame rate switches to one that is (144 → 120 Hz), and a variable-refresh screen to a fixed-rate mode at a multiple (ProMotion 120 → 60 Hz at 60 and 30 fps)
 DM_SF_TRACE	diagnostic	`=1` logs every request on the game's own HIPC client sessions that the host answers (`hle_sf.c`)
 DM_SHADER_FILES	switch	`1` packs an NVN game's shader library into the unsigned IPA of `build_ipa.sh` as its separate files, `msl/b-<chain>/`, not as the one file `b-<chain>.img`, for install tools that cannot copy a large file (AltServer: 2 GiB) (`pack_ipa.py --shader-files`; off by default; `--shader-files` of the NSP script sets this)

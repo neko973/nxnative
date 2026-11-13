@@ -74,6 +74,18 @@ The first start of the app prepares pipelines for several minutes behind a progr
 
 ### Update to the newest version
 
+If you already have the app, update it in place. This takes a few minutes, needs neither the dump nor the work folder, and leaves the game files, the shaders and your saves alone:
+
+```
+cd nxnative
+git pull
+./install-ocarina-mac.sh --update "/path/to/The Legend of Zelda Ocarina of Time.app"
+```
+
+Quit the game first. The script builds the new host from the folder you pulled, puts it into the app with the new settings list, built-in settings and pipeline list, and signs the app again, which reads the whole game image and takes two or three minutes of the total. What it replaced is kept in a folder beside the app (`<app name> before update <date>`), so the old version can be put back; delete it once the game runs. It works for any app this branch's script built: one built before 2026-11-12 has its shaders under an older version number of the same shaders, which the script recognizes and builds the host for.
+
+When an update changes the shader tools or the game's patches, the quick update stops and says so. Then run the full install again:
+
 ```
 cd nxnative
 git pull
@@ -136,7 +148,7 @@ DM_METAL_HUD=1
 ```
 
 - The settings window's **Texture filtering** is 16x for this game: the game itself asks for 1x and 2x, which blurs the ground and walls where the camera looks along them. It cost no measurable GPU time on an M3 Pro; **Game's own** gives the original back. **Texture size** is for Macs short of memory (see Known limits).
-- `DM_FPS_TICKS=1` makes the settings window's **60 fps** mean "60 where the scene holds it, an even 40 where it does not, 30 last". For frames that never change rate, choose **40 fps** there instead.
+- `DM_FPS_TICKS=1` makes the settings window's **60 fps** mean "60 where the scene holds it, an even 40 where it does not, 30 last". For frames that never change rate, choose **40 fps** there instead. On a screen below 120 Hz (a MacBook Air, an iMac, most external screens) there is no 40: it is 60, or 30 where the scene does not hold 60. A build from before 2026-11-12 ran at a fixed 30 fps on such a screen; see [If it runs at 30 fps](#if-it-runs-at-30-fps).
 - `DM_SCREEN_MATCH=0` keeps a ProMotion screen at 120 Hz in fullscreen, which the 40 fps step needs.
 - `DM_METAL_HUD=1` shows Apple's performance HUD. Its frame interval line is blue only for frames within 16.7 ms and red for anything longer, so 40 fps is red however even it is.
 
@@ -145,13 +157,35 @@ DM_METAL_HUD=1
 The log is `~/Library/Logs/nxnative/0400486024DEC000.log`. After a minute of play it should contain:
 
 - `event gate on (DM_NVN_EVENT_GATE)` and, every 1,800 gated waits, `event gate: N waits put on the Metal queue so far, open after X ms on average`. A line `[RED] ... event gate: the game's event ... did not come within 100 ms` means a gate was forced open; three of them turn the gate off for that run. Please report where it happened.
-- `60 fps in ticks: the screen shows 120 Hz` (with `DM_FPS_TICKS=1` on a 120 Hz screen).
+- `60 fps in ticks: the screen shows 120 Hz` (with `DM_FPS_TICKS=1` on a 120 Hz screen), or `60 fps in ticks: the screen is below 120 Hz: 60 fps (hold 2) or 30 (hold 4), no 40` on any other screen.
 - `upscaler: first dispatch of fa3033d05c0a41d6_b drawn by MetalFX`.
 - `frame step: game time X s in Y s (1.000 of real time); held 2 / 3 / 4 ticks a / b / c frames`: the share of frames at 60, 40 and 30 fps, and the game's speed.
 
 When judging smoothness from a `DM_NVN_TSV` table, read `@presented_ms` (the interval between the frames the screen showed, what the HUD's line shows; -1 is a frame that was never shown). `@display_ms` is the pacer's planned slot interval and `@frame_ms` the game-side interval; both alternate by a millisecond or more when the game runs ahead of the screen, which the screen does not show. Make sure the display is on: a run with the display asleep never goes fullscreen (its log has no `front end: drawable` line at the screen's size).
 
 Useful numbers to report with a result: the Mac and its GPU core count, fullscreen or window, the area, and a few of the `timing up to frame` lines (frame time and GPU p50 / p95).
+
+## Game Mode
+
+The settings window has a **Game Mode** switch (under Performance), off by default. On, macOS's Game Mode takes the game while it is fullscreen: background tasks get less of the CPU and GPU, and Bluetooth controllers and AirPods are read twice as often. It does not raise the frame rate of a game that already holds 60.
+
+It is off by default because upstream found that on M4 Pro Macs Game Mode dropped the GPU to its lowest clock 45 s to 3 minutes into a fullscreen game, which halves the frame rate ([frame-rate.md](reference/frame-rate.md#macos-game-mode-holds-the-gpu-at-its-lowest-clock)). On the M3 Pro this branch was tuned on, that did not happen. One run each over the same four-minute walk of a heavier save, fullscreen, the system's log showing `Game mode enabled` for the whole first run (seven minutes with its start):
+
+| | Frame rate | Frames shown late | GPU time a frame (p50 / p95) |
+|---|---|---|---|
+| Game Mode on (on battery) | 60.0 fps | 0.1 % | 14.0 / 15.2 ms |
+| Game Mode off (on the charger) | 60.0 fps | 0.1 % | 12.9 / 13.9 ms |
+| Game Mode on, started by the switch (on the charger, two minutes of the walk) | 60.0 fps | 0.1 % | 14.1 / 15.2 ms |
+
+The GPU took about 1 ms more a frame with it, on battery and on the charger alike. If the game holds 60 for a minute or two and then falls to 30 or 40 with the same view, that is the clock drop upstream measured: turn the switch off.
+
+An app built before 2026-11-12 gets the switch with the quick update ([Update to the newest version](#update-to-the-newest-version)). With it on, the game runs from a second copy of its program inside the app (`Contents/Helpers/GameMode.app`), which is how the switch can be turned off again: macOS remembers an app it has once treated as a game.
+
+## If it runs at 30 fps
+
+- **Exactly 30, everywhere, on a screen below 120 Hz** (a MacBook Air, an iMac, an external screen, or a MacBook Pro's screen set to 60 Hz): a mistake in this branch until 2026-11-12. The frame step capped the game at 30 on every screen that does not show 120 Hz, whatever the Mac could do. The log then has `frame step cap 0 → 30 fps at present 1`. Update the app ([Update to the newest version](#update-to-the-newest-version): a few minutes, no dump needed); the log line becomes `frame step cap 0 → 60 fps`.
+- **30 or 40 in some places, 60 in others:** the Mac's GPU does not hold 60 there. The `frame step: game time` lines of the log say how the frames were shared between 60, 40 and 30. In the settings window, lower **Render scale** a step at a time, keep the game fullscreen (a window costs GPU time), and stop anything that records or streams the screen. On a Mac that still does not hold 60, **Frame rate: 30** (or 40 on a 120 Hz screen) gives even frames instead of a rate that changes.
+- **Anything else:** send the run log, `~/Library/Logs/nxnative/0400486024DEC000.log`, taken after a minute of play, with the Mac's model and its screen. The files in the build's `logs` folder only show that the build worked.
 
 ## Known limits
 
