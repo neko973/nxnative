@@ -67,6 +67,7 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	$(B)/t_ctrl_prompt
 	$(B)/t_motion_pro
 	$(B)/t_motion_pro_mac
+	$(B)/t_motion_joycon
 	TMPDIR="$(abspath $(B))" $(B)/t_hid
 	$(B)/t_pad_hid
 	$(B)/t_pad_pro
@@ -239,9 +240,11 @@ $(B)/t_home_quit_mac: t_home_quit_mac.m ../home_quit_mac.h | $(B)
 run: $(B)/t_ctrl_prompt
 $(B)/t_ctrl_prompt: t_ctrl_prompt.c ../ctrl_prompt.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -fsanitize=address,undefined -I.. -o $@ t_ctrl_prompt.c
-run: $(B)/t_motion_pro $(B)/t_motion_pro_mac
+run: $(B)/t_motion_pro $(B)/t_motion_pro_mac $(B)/t_motion_joycon
 $(B)/t_motion_pro: t_motion_pro.c ../motion_pro.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -fsanitize=address,undefined -o $@ t_motion_pro.c
+$(B)/t_motion_joycon: t_motion_joycon.c ../motion_joycon_mac.h ../motion_pro.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -o $@ t_motion_joycon.c
 $(B)/t_motion_pro_mac: t_motion_pro_mac.m ../motion_pro_mac.h ../motion_pro.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_motion_pro_mac.m -framework Foundation -framework GameController -framework IOKit
 $(B)/t_hid: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../dm_input.h ../hle.h ../dm.h $(GAME_H) | $(B)
