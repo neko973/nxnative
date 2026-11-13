@@ -11,7 +11,7 @@
 > ./install-ocarina-mac.sh /path/to/your/OcarinaOfTime.nup
 > ```
 >
-> **Already have the app?** Update it in a few minutes, without the dump (quit the game first). The update of 2026-11-12 fixes the game running at a fixed 30 fps on every screen below 120 Hz (a MacBook Air, an iMac, most external screens):
+> **Already have the app?** Update it in a few minutes, without the dump (quit the game first). The update of 2026-11-12 fixes the game running at a fixed 30 fps on every screen below 120 Hz (a MacBook Air, an iMac, most external screens). From 2026-11-13 the app's settings window has a **Check for Updates…** button that does all of this by itself; an app built before that needs it once from the Terminal:
 >
 > ```
 > cd nxnative

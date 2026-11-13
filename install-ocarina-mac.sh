@@ -38,7 +38,7 @@ bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 die()  { red "STOPPED: $1"; shift; for l in "$@"; do printf '  %s\n' "$l" >&2; done; exit 1; }
 
-DUMP=""; YES=0; DAMAGED=0; CHECK=0; OUT=""; WORKDIR=""; UPDATE=""
+DUMP=""; YES=0; DAMAGED=0; CHECK=0; OUT=""; WORKDIR=""; UPDATE=""; SELFUPDATE=""; CHECKUPDATE=""; FROMAPP=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --yes|-y) YES=1 ;;
@@ -47,13 +47,16 @@ while [ $# -gt 0 ]; do
     --out|-o) shift; OUT="${1:-}" ;;
     --work-dir) shift; WORKDIR="${1:-}" ;;
     --update) shift; UPDATE="${1:-}"; [ -n "$UPDATE" ] || die "--update needs the app's path" "Usage: ./install-ocarina-mac.sh --update \"/path/to/the game.app\"" ;;
+    --self-update) shift; SELFUPDATE="${1:-}"; [ -n "$SELFUPDATE" ] || die "--self-update needs the app's path" ;;   # the app's Check for Updates: git pull here, then --update
+    --check-update) shift; CHECKUPDATE="${1:-}"; [ -n "$CHECKUPDATE" ] || die "--check-update needs the app's path" ;;   # says UPTODATE or AVAILABLE and what is new; changes nothing
+    --from-app) FROMAPP=1 ;;   # started by the app's settings window, which stays open: PROGRESS lines for its bar
     -h|--help) sed -n '2,/^set -u/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown option $1" "Run ./install-ocarina-mac.sh --help" ;;
     *) [ -z "$DUMP" ] && DUMP="$1" || die "more than one path given: \"$DUMP\" and \"$1\"" "Put quotes around a path that has spaces in it." ;;
   esac
   shift
 done
-[ $CHECK = 1 ] || [ -n "$UPDATE" ] || [ -n "$DUMP" ] || die "no dump given" "Usage: ./install-ocarina-mac.sh /path/to/OcarinaOfTime.nup" "(your own dump of the game: a .nup file or a dump folder)"
+[ $CHECK = 1 ] || [ -n "$UPDATE" ] || [ -n "$SELFUPDATE" ] || [ -n "$CHECKUPDATE" ] || [ -n "$DUMP" ] || die "no dump given" "Usage: ./install-ocarina-mac.sh /path/to/OcarinaOfTime.nup" "(your own dump of the game: a .nup file or a dump folder)"
 UPDATE="${UPDATE%/}"
 if [ -n "$UPDATE" ]; then
   [ -z "$DUMP" ] || die "--update takes the app alone, not a dump as well" "Usage: ./install-ocarina-mac.sh --update \"/path/to/the game.app\""
@@ -79,7 +82,11 @@ update_app() {
   TID=$(/usr/libexec/PlistBuddy -c "Print :DMTitleID" "$PL" 2>/dev/null || true)
   [ "$TID" = "$TITLE" ] || die "\"$APP\" is not Ocarina of Time for Switch 2 (title ID ${TID:-none}, expected $TITLE)"
   [ -f "$DM/main.fixups.tsv" ] && [ -f "$APP/Contents/MacOS/dmhost" ] || die "the app lacks files this script's builds have (Contents/MacOS/dmhost, Contents/Resources/dm/main.fixups.tsv)" "Run the full install instead."
-  if pgrep -f "$APP/Contents/MacOS/" >/dev/null 2>&1; then die "the game is running" "Quit it, then run this again."; fi
+  # fixed strings: pgrep reads its argument as a pattern, and "(native)" in a path never matched. From the app's own window (--from-app) the launcher runs and only the game counts
+  # (a command line that begins with the path: a grep for it would find itself in the list)
+  running() { ps -axo command= | awk -v p="$1" 'index($0, p) == 1 { f = 1 } END { exit !f }'; }
+  if running "$APP/Contents/MacOS/dmhost" || running "$APP/Contents/Helpers/GameMode.app/Contents/MacOS/dmhost"; then die "the game is running" "Quit it, then run this again."; fi
+  if [ $FROMAPP = 0 ] && running "$APP/Contents/MacOS/nxnative"; then die "the game's settings window is open" "Quit it, then run this again."; fi
   [ -w "$APP/Contents/MacOS" ] && [ -w "$DM" ] || die "cannot write into \"$APP\"" "Check the app's permissions, or copy it to a folder of your own."
   WANT=$(sed -n 's/^#define DMSH_CHAIN "\(.*\)"$/\1/p' "$CH")
   [ -n "$WANT" ] || die "no shader chain version in dm/gfx/nvn/dmsh_chain.h"
@@ -99,10 +106,12 @@ update_app() {
 
   step "4/4  Building the host and putting it into the app (a few minutes)"
   LOG="$REPO/install-ocarina-mac.log"; echo "Log: $LOG"
+  creep 10 45 240 "Building the game program" & CREEP=$!
   if ! ( cd "$REPO/dm/host" && PATH="$VENV/bin:$PATH" make -s GAME=$TITLE dmhost ) >"$LOG" 2>&1; then
-    restore_chain; tail -20 "$LOG" >&2; die "the host did not build" "The compiler's last lines are above and in $LOG."
+    kill $CREEP 2>/dev/null; restore_chain; tail -20 "$LOG" >&2; die "the host did not build" "The compiler's last lines are above and in $LOG."
   fi
-  restore_chain; trap - EXIT INT TERM
+  kill $CREEP 2>/dev/null; wait $CREEP 2>/dev/null; restore_chain; trap - EXIT INT TERM
+  progress 48 "Putting the new files into the app"
   HOST="$REPO/dm/host/dmhost"
   strings -a "$HOST" | grep -q "$USE" || die "the host that was built is not for chain $USE" "See $LOG."
   KEEP="${APP%.app} before update $(date +%Y-%m-%d-%H%M)"
@@ -141,10 +150,13 @@ print("launcher and Game Mode host:", pack_app.update_launcher(sys.argv[2]))
 ' "$REPO" "$APP" >>"$LOG" 2>&1; then
     tail -8 "$LOG" >&2; die "the launcher could not be built" "Put the old files back from \"$KEEP\" (dmhost and nxnative into Contents/MacOS, Info.plist into Contents, the rest into Contents/Resources/dm). See $LOG."
   fi
+  mkdir -p "$HOME/Library/Application Support/nxnative/$TITLE" && printf '%s\n' "$REPO/install-ocarina-mac.sh" > "$HOME/Library/Application Support/nxnative/$TITLE/update.path"   # where the app's Check for Updates finds this script
   echo "Signing the app (it reads the whole game image: two or three minutes) ..."
+  creep 55 97 200 "Signing the app (two or three minutes)" & CREEP=$!
   find "$APP" -name '._*' -type f -delete 2>/dev/null
   codesign --force --sign - "$APP/Contents/Helpers/GameMode.app" >>"$LOG" 2>&1 && codesign --force --sign - "$APP/Contents/MacOS/dmhost" >>"$LOG" 2>&1 && codesign --force --sign - "$APP" >>"$LOG" 2>&1 && codesign --verify "$APP" >>"$LOG" 2>&1 \
-    || die "the app could not be signed" "See $LOG. The old host, settings and Info.plist are in \"$KEEP\"."
+    || { kill $CREEP 2>/dev/null; die "the app could not be signed" "See $LOG. The old host, settings and Info.plist are in \"$KEEP\"."; }
+  kill $CREEP 2>/dev/null; wait $CREEP 2>/dev/null; progress 100 "Updated"
   echo
   bold "Updated: $APP"
   echo
@@ -153,6 +165,37 @@ print("launcher and Game Mode host:", pack_app.update_launcher(sys.argv[2]))
   echo "- The first start may prepare a few more pipelines behind the progress screen (seconds, not minutes)."
   echo "- New in the settings window: Texture filtering, Texture size and Game Mode (docs/settings.md says what they do)."
 }
+
+# The app's Check for Updates (dm/mac/Launcher.swift) runs these two. PROGRESS <percent> <text> lines are for its bar
+progress() { if [ $FROMAPP = 1 ]; then echo "PROGRESS $1 $2"; fi; }
+creep() {   # creep <from> <to> <seconds> <text> &: the bar moving through a step that takes long and says nothing
+  local i=0 n=$(( $3 / 2 )); while [ $i -lt $n ]; do progress $(( $1 + ($2 - $1) * i / n )) "$4"; sleep 2; i=$((i + 1)); done
+}
+self_update() {   # $1: the app; $2: 1 = only say whether there is something new
+  local app="${1%/}" pl appc up behind headc
+  pl="$app/Contents/Info.plist"; [ -f "$pl" ] || die "\"$app\" is not an app"
+  git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die "this folder is not a git clone, so it cannot fetch updates" "Get one:  git clone -b ocarina-mac-60fps https://github.com/neko973/nxnative.git" "and run  ./install-ocarina-mac.sh --update \"$app\"  from it once."
+  up=$(git -C "$REPO" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || die "this folder's branch does not follow a branch of the fork" "Get a clone:  git clone -b ocarina-mac-60fps https://github.com/neko973/nxnative.git" "and run  ./install-ocarina-mac.sh --update \"$app\"  from it once."
+  progress 2 "Looking for a new version"
+  git -C "$REPO" fetch --quiet "${up%%/*}" 2>/dev/null || die "the fork could not be reached" "Check the internet connection and try again."
+  appc=$(/usr/libexec/PlistBuddy -c "Print :DMCommit" "$pl" 2>/dev/null || true)
+  behind=$(git -C "$REPO" rev-list --count 'HEAD..@{u}'); headc=$(git -C "$REPO" rev-parse --short=12 '@{u}')
+  if [ "$2" = 1 ]; then
+    if [ "$behind" = 0 ] && [ "$(git -C "$REPO" rev-parse --short=12 HEAD)" = "$appc" ]; then echo "UPTODATE $appc"; exit 0; fi
+    echo "AVAILABLE $headc"
+    { git -C "$REPO" log --no-merges --format='NEW %s' "$appc..@{u}" 2>/dev/null || git -C "$REPO" log --no-merges --format='NEW %s' 'HEAD..@{u}'; } | head -8
+    exit 0
+  fi
+  if [ "$behind" != 0 ]; then
+    progress 5 "Downloading the new version"
+    git -C "$REPO" merge --ff-only --quiet '@{u}' 2>/dev/null || die "this folder has changes of its own that the update would overwrite" "In $REPO:  git status  shows them."
+  fi
+  if [ "$(git -C "$REPO" rev-parse --short=12 HEAD)" = "$appc" ]; then echo "UPTODATE $appc"; exit 0; fi
+  # the script as the update brought it, not the one bash is reading
+  if [ $FROMAPP = 1 ]; then exec /bin/bash "$REPO/install-ocarina-mac.sh" --update "$app" --from-app --yes; else exec /bin/bash "$REPO/install-ocarina-mac.sh" --update "$app" --yes; fi
+}
+[ -z "$CHECKUPDATE" ] || self_update "$CHECKUPDATE" 1
+[ -z "$SELFUPDATE" ] || self_update "$SELFUPDATE" 0
 
 step "1/5  This Mac"
 [ "$(uname -s)" = Darwin ] || die "this builds a Mac app and runs on a Mac only"
@@ -261,6 +304,7 @@ if [ "$RC" != 0 ]; then
 fi
 
 step "5/5  Done"
+mkdir -p "$HOME/Library/Application Support/nxnative/$TITLE" && printf '%s\n' "$REPO/install-ocarina-mac.sh" > "$HOME/Library/Application Support/nxnative/$TITLE/update.path"   # where the app's Check for Updates finds this script
 APP=$(sed -n 's/^app: \(.*\.app\)$/\1/p' "$LOG" | tail -1)   # the packer's last line; a path may have spaces
 [ -n "$APP" ] || APP=$(grep -ao '[^ ]*/[^/]*\.app' "$LOG" | tail -1)
 [ -n "$OUT" ] && APP="$OUT"

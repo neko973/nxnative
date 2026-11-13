@@ -75,7 +75,11 @@ The first start of the app prepares pipelines for several minutes behind a progr
 
 ### Update to the newest version
 
-If you already have the app, update it in place. This takes a few minutes, needs neither the dump nor the work folder, and leaves the game files, the shaders and your saves alone:
+If you already have the app, update it in place. This takes a few minutes, needs neither the dump nor the work folder, and leaves the game files, the shaders and your saves alone.
+
+**From inside the app:** the settings window that opens before the game has a **Check for Updates…** button at the top right. It asks the fork whether there is something new and lists it; **Update Now** then downloads it into the folder you built from, rebuilds the game program and the settings window, shows a progress bar while it does (signing is the slow part, two or three minutes) and opens the new version by itself. It needs the folder you built the app from (a `git clone`, where it left it) and the same tools as the install. An app built before 2026-11-13 gets the button with one update from the Terminal:
+
+**From the Terminal:**
 
 ```
 cd nxnative
