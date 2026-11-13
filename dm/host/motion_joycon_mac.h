@@ -11,7 +11,10 @@
 // without guessing. Each Joy-Con's sensor is its own to the npad layer (dm_motion_set_joy: the two sensors of a dual npad, front_mac.m shows the pair as Joy-Cons), and the
 // right one's is also the player's single sensor (dm_motion_set_hid; DM_MOTION_JOYCON_SIDE=L: the left one's) for a game that reads the pair as one controller.
 // A single Joy-Con held sideways is not read.
-// The sensor is switched off again when the game loses the input (and so when it quits in the ordinary way). DM_MOTION=0 or DM_MOTION_HID=0 turns all of this off.
+// Requests go out only from the report callback, to a Joy-Con that has just sent a report, and never again after one failed: a request to a Joy-Con that had just
+// disconnected (the "sensor off" this file used to send when its controller went away) blocked the main thread 350 ms and left the device's plug-in in a state that crashed in
+// CFRelease when IOHIDManager let the device go (_CFBundleDeallocatePlugIn under -[HIDDevice dealloc]; Ocarina of Time, 2026-11-13). So the sensor is not switched off: it
+// stays on until the Joy-Con disconnects, as on the console. DM_MOTION=0 or DM_MOTION_HID=0 turns all of this off.
 // All callbacks run on the main run loop, as motion_pro_mac.h's.
 #pragma once
 #include "motion_pro.h"
@@ -56,21 +59,23 @@ static inline void jc_motion_origin(pro_motion_sample *s, const int16_t origin[3
 #include "dm_input.h"
 #include <stdlib.h>
 
-typedef struct jc_device { IOHIDDeviceRef hid; int pid, empty, asked, said, cal; int16_t origin[3]; uint8_t seq, report[512]; pro_motion motion; struct jc_device *next; } jc_device;
+typedef struct jc_device { IOHIDDeviceRef hid; int pid, empty, asked, failed, cal, begun; int16_t origin[3]; uint8_t seq, report[512]; pro_motion motion; struct jc_device *next; } jc_device;
 static IOHIDManagerRef g_jc_manager;
 static jc_device *g_jc_devices, *g_jc_bound[2];   // bound: the left (0) and the right (1) Joy-Con of the one pair
 static int g_jc_player = -1, g_jc_active = 1, g_jc_controllers, g_jc_slot = -1, g_jc_single = 1;   // single: the side whose sensor is also the player's one sensor
 static void (*g_jc_changed)(void);
 static int jc_side(const jc_device *d) { return d->pid == JC_PID_RIGHT; }
 
-static void jc_imu(jc_device *d, int on) {
+// A request to the Joy-Con: only called from jc_report, where it has just sent a report (see the head of this file)
+static void jc_ask(jc_device *d, int on) {
+    if (d->failed) return;
     uint8_t o[49]; jc_motion_request(o, d->seq++, on);
     IOReturn r = IOHIDDeviceSetReport(d->hid, kIOHIDReportTypeOutput, 0x01, o, sizeof o);
     if (on > 0) d->asked++;
     d->empty = 0;
-    if (r != kIOReturnSuccess && !d->said) { d->said = 1; LOG("[RED] Joy-Con raw motion: a request to the Joy-Con failed (0x%x)", r); }
+    if (r != kIOReturnSuccess) { d->failed = 1; LOG("[RED] Joy-Con raw motion: a request to the %s Joy-Con failed (0x%x); nothing more is sent to it", jc_side(d) ? "right" : "left", r); }
 }
-static void jc_begin(jc_device *d) { d->motion = (pro_motion){0}; d->asked = 0; jc_imu(d, d->cal ? 1 : -1); }   // the calibration first, once
+static void jc_begin(jc_device *d) { d->motion = (pro_motion){0}; d->asked = 0; d->empty = 0; d->begun = 0; }   // its next report asks for the calibration, then the sensor
 static void jc_clear(int player, int side) { if (player < 0) return; dm_motion_clear_joy(player, side); if (side == g_jc_single || !g_jc_bound[g_jc_single]) dm_motion_clear_hid(player); }
 static void jc_route(void) {
     jc_device *want[2] = {NULL, NULL}; int n[2] = {0, 0};
@@ -81,38 +86,37 @@ static void jc_route(void) {
         jc_device *d = want[side], *was = g_jc_bound[side];
         if (d == was && (p == g_jc_player || !d)) continue;
         jc_clear(g_jc_player, side);
-        if (was && was != d && was->motion.seen) jc_imu(was, 0);
         g_jc_bound[side] = d;
         if (!d) continue;
         LOG("[hid] Joy-Con raw motion: player %d, the %s Joy-Con's sensor (report 0x30, switched on by the host)", p + 1, side ? "right" : "left");
-        if (g_jc_active) jc_begin(d);
+        jc_begin(d);
     }
     g_jc_player = p;
 }
 static void dm_motion_joycon_players(int controllers, int slot) { g_jc_controllers = controllers; g_jc_slot = slot; jc_route(); }
-static void dm_motion_joycon_active(int active) {
+static void dm_motion_joycon_active(int active) {   // out of focus the samples are dropped; the sensor stays on
     if (active == g_jc_active) return;
     g_jc_active = active;
-    for (int side = 0; side < 2; side++) if (g_jc_bound[side]) {
-        if (active) jc_begin(g_jc_bound[side]); else { g_jc_bound[side]->motion = (pro_motion){0}; jc_imu(g_jc_bound[side], 0); jc_clear(g_jc_player, side); }
-    }
+    for (int side = 0; side < 2; side++) if (g_jc_bound[side]) { g_jc_bound[side]->motion = (pro_motion){0}; g_jc_bound[side]->empty = 0; if (!active) jc_clear(g_jc_player, side); }
 }
 static void jc_report(void *ctx, IOReturn result, void *sender, IOHIDReportType type, uint32_t report_id, uint8_t *r, CFIndex len) {
     (void)sender;
     jc_device *d = ctx; int side = jc_side(d);
     if (result != kIOReturnSuccess || type != kIOHIDReportTypeInput || len < 49 || !g_jc_active || d != g_jc_bound[side]) return;
+    if (!d->begun) { d->begun = 1; if (!d->cal) { jc_ask(d, -1); return; } }   // the calibration first, once per Joy-Con
     if (report_id == 0x21 && !d->cal && jc_motion_cal(r, (size_t)len, d->origin)) {
         d->cal = 1; LOG("[hid] Joy-Con raw motion: %s Joy-Con, gyro origin %d %d %d counts (factory calibration)", side ? "right" : "left", d->origin[0], d->origin[1], d->origin[2]);
-        if (!d->asked) jc_imu(d, 1);
+        if (!d->asked) jc_ask(d, 1);
         return;
     }
     if (report_id != 0x30) return;
     pro_motion_sample s[3];
     int was = d->motion.live, n = pro_motion_decode(&d->motion, r, (size_t)len, now_ns(), s);
-    if (!d->motion.live) {   // no data yet: the request was lost, or macOS set the Joy-Con up again after it
+    if (!d->motion.live) {   // no data: the sensor is off (not asked for yet, the request lost, or macOS set the Joy-Con up again after it)
+        if (d->cal && !d->asked) { jc_ask(d, 1); return; }
         if (++d->empty < (d->asked ? JC_ASK_AFTER : JC_CAL_WAIT)) return;
         if (!d->asked && !d->cal) LOG("[hid] Joy-Con raw motion: no calibration answer from the %s Joy-Con; its gyro is used without offsets", side ? "right" : "left");
-        if (d->asked < JC_ASK_MAX) jc_imu(d, 1);
+        if (d->asked < JC_ASK_MAX) jc_ask(d, 1);
         else if (d->asked == JC_ASK_MAX) { d->asked++; d->empty = 0; LOG("[RED] Joy-Con raw motion: no sensor data after %d requests; the %s Joy-Con has no motion", JC_ASK_MAX, side ? "right" : "left"); }
         return;
     }
