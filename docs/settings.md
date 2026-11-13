@@ -243,7 +243,7 @@ Apple's performance overlay over the game: frame rate, frame and GPU times, memo
 
 Mac only. Lets macOS's Game Mode take the game while it is fullscreen: background tasks get less of the CPU and GPU, and Bluetooth controllers and AirPods are read twice as often. Off by default.
 
-- **What it costs:** on some Macs Game Mode lowers the GPU's clock a minute or two into a fullscreen game, which halves the frame rate ([frame-rate.md](reference/frame-rate.md#macos-game-mode-holds-the-gpu-at-its-lowest-clock): M4 Pro). Ocarina of Time on an M3 Pro held 60 fps through seven minutes with it, at about 1 ms more GPU time a frame.
+- **What it costs:** on some Macs Game Mode lowers the GPU's clock a minute or two into a fullscreen game, which halves the frame rate ([frame-rate.md](reference/frame-rate.md#macos-game-mode-holds-the-gpu-at-its-lowest-clock): M4 Pro). Ocarina of Time on an M3 Pro held 60 fps through seven minutes with it, at no measurable cost (14.65 against 14.55 ms of GPU time a frame, standing in one view).
 - **When to change it:** turn it on for a Bluetooth controller that feels late or when background work makes the game hitch; turn it off if the frame rate falls after a minute or two with the same view.
 - **How it works:** macOS decides Game Mode from the app's `Info.plist` and remembers an app it has treated as a game, so the app carries the game program twice, once in a bundle that Game Mode takes (`Contents/Helpers/GameMode.app`), and this setting picks which one the launcher starts. With it on, the Dock shows a second icon for the game while it runs.
 

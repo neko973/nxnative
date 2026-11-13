@@ -15946,6 +15946,10 @@ enum { KEEP_SPIN = 140000 };
 // 14 / 11.5 ms: in handheld mode the game's 13.4 ms of GPU at the clock macOS picks fits its frame, and holding the clock higher only heated the fanless Air into slowing its CPU
 // (58 fps after 10 minutes, against 60 for 10 minutes with the keeper off); at 30 fps the frames take 20 ms and more, and the keeper lifts them back. DM_GPU_KEEP_MS=<hi>,<lo> overrides
 static double KEEP_HI_MS = 14.0, KEEP_LO_MS = 11.5;
+#define KEEP_LATE_NS 20000000000ull   // mode 3: how long the keeper spins on after the frames stopped needing it
+#define KEEP_GIVEUP_NS 10000000000ull   // mode 3: frames still late this long after it came on (the clock rises about 100 MHz a second): it is not the clock
+#define KEEP_RETRY_NS 60000000000ull   // mode 3: and it stays off this long
+int mtl_fps_target(void);
 static _Atomic int g_keep_active;
 __attribute__((weak)) int nvn_fstep_above_min(void) { return 0; }   // hle_nvn.c: the frame step holds frames longer than its cap's shortest hold
 static void *gpu_keep_main(void *arg) {
@@ -15964,7 +15968,39 @@ static void *gpu_keep_main(void *arg) {
         // mode 3 (DM_GPU_KEEP=hold): full duty only while the frame step holds frames longer than its shortest hold. At 60 fps in ticks Ocarina of Time's village dropped to the
         // 40 fps hold on a few late frames; the GPU then idled a third of each frame, macOS lowered its clock (1380 -> ~1200 MHz), the same frames read 21.8 ms instead of 15.5
         // and the hold never came back. At the shortest hold the GPU is busy anyway and the keeper's own work only costs frame time, so it stops there
-        if (mode == 3) duty = nvn_fstep_above_min() ? 1 : 0;
+        // (11-12) and while the frames are late at the shortest hold. "The GPU is busy anyway" there did not hold the clock: standing in Kakariko Village (GPU 14.0 ms a frame at
+        // 1380 MHz, 60 fps) macOS took the clock to 800-1050 MHz with the GPU 96-97% busy, the same passes each took 1.35 times as long (18-19.5 ms a frame, 52 fps), and it stayed
+        // there for minutes with 40 s back at 1380 MHz now and then (tools/gpufreq; no other process used the GPU). The sticky holds keep 60 fps through that, so the hold never
+        // rose and this mode never spun: an hour and a quarter of play had 12 minutes of it. So: full duty from the moment half a second of frames takes more than 0.95 of the
+        // frame period, kept while the frames take more than 0.58 of it (at the top clock; 0.58 = the lowest clock seen under load against the top one, 796 / 1380: a scene
+        // below that fits its period at any of them) and for KEEP_LATE_NS after
+        if (mode == 3) {
+            // Two ways out, for a Mac this cannot help: frames still late KEEP_GIVEUP_NS after the keeper came on (the scene is more than this GPU does in a period at its top
+            // clock: the spin is heat for nothing, and the frame step takes over) stop it for KEEP_RETRY_NS; and it does not spin at all while macOS reports the thermal state
+            // serious or worse (a fanless MacBook Air kept at its top clock heated until its CPU slowed, above)
+            static uint64_t keep_until, on_since, late_since, retry_at; static int late_lines, hot;
+            if (now - last_adj > 500000000ull) {
+                last_adj = now; uint64_t f = atomic_load(&g_cur_frame); double sum = 0; int k = 0, fps = mtl_fps_target();
+                for (uint64_t d = 8; d < 38 && f > d; d++) { double g = mtl_gpu_ms(f - d); if (g >= 0) { sum += g; k++; } }
+                int hot_now = NSProcessInfo.processInfo.thermalState >= NSProcessInfoThermalStateSerious;
+                if (hot_now != hot && late_lines++ < 40) MLOG("GPU clock keeper: %s", hot_now ? "stopped, the Mac's thermal state is serious" : "allowed again, the thermal state is below serious");
+                hot = hot_now;
+                if (k >= 4 && fps > 0) {
+                    double g = sum / k, period = 1000.0 / fps; int was = now < keep_until, late = g > 0.95 * period;
+                    if (!late) late_since = 0; else if (!late_since) late_since = now;
+                    if (was && late && now - on_since > KEEP_GIVEUP_NS && now - late_since > KEEP_GIVEUP_NS) {
+                        keep_until = 0; retry_at = now + KEEP_RETRY_NS;
+                        if (late_lines++ < 40) MLOG("GPU clock keeper: off at the shortest hold, frames still take %.1f ms of %.1f with the clock held up (it tries again in %llu s)", g, period, KEEP_RETRY_NS / 1000000000ull);
+                    } else if (!hot && now >= retry_at && (late || (was && g > 0.58 * period))) {
+                        if (!was) { on_since = now; if (late_lines++ < 40) MLOG("GPU clock keeper: on at the shortest hold (a frame's GPU time %.1f ms of %.1f)", g, period); }
+                        keep_until = now + KEEP_LATE_NS;
+                    }
+                }
+            }
+            if (hot) keep_until = 0;
+            { static int was_on; int on = now < keep_until; if (was_on && !on && late_lines++ < 40) MLOG("GPU clock keeper: off at the shortest hold"); was_on = on; }
+            duty = !hot && (nvn_fstep_above_min() || now < keep_until) ? 1 : 0;
+        }
         if (mode == 2 && now - last_adj > 500000000ull) {   // the frames' GPU time over the last half second, 8 frames back as the timing line takes it
             last_adj = now; uint64_t f = atomic_load(&g_cur_frame); double sum = 0; int k = 0;
             for (uint64_t d = 8; d < 38 && f > d; d++) { double g = mtl_gpu_ms(f - d); if (g >= 0) { sum += g; k++; } }
