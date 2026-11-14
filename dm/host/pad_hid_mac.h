@@ -32,6 +32,7 @@ typedef struct hid_pad {
 static IOHIDManagerRef g_hidpad_manager;
 static hid_pad *g_hidpads, *g_hidpads_waiting;   // waiting: GameController says it lists the device (gc_hint); read as HID if it has not after HIDPAD_GC_WAIT
 static hid_pad *g_hidpads_gc;                    // GameController reads them: kept, unread, to count identical pads
+static pad_hid_fell g_hidpads_fell;              // the models whose wait ran out in this run: read at once when they connect again
 #define HIDPAD_GC_WAIT 2.0
 #define HIDPAD_TWIN_WAIT 3.0
 static int g_hidpad_log, g_hidpad_motion = 1, g_twins_off, g_twins_due, g_twins_waiting;
@@ -128,11 +129,16 @@ static void hidpad_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRe
     d->gc_hint = [GCController supportsHIDDevice:hid];   // once per device: the call is not cheap
     if (!d->gc_hint) { hidpad_use(d); return; }
     if (hidpad_gc_native(d->vid) || hidpad_gc_listed(d->name)) { hidpad_keep_gc(d); hidpad_models_changed(); return; }   // front_mac.m reads it through its GCController
+    if (pad_hid_fell_has(&g_hidpads_fell, d->vid, d->pid)) {   // back after a drop: GameController did not list it the first time, and hidpad_gc_connected takes it over if it does now
+        LOG("controller '%s' (HID, %04x:%04x): read as HID at once, as before in this run", d->name, d->vid, d->pid);
+        hidpad_use(d); return;
+    }
     d->next = g_hidpads_waiting; g_hidpads_waiting = d;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(HIDPAD_GC_WAIT * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         hid_pad *w = hidpad_unlink(&g_hidpads_waiting, hid); if (!w) return;   // removed meanwhile
         if (hidpad_gc_listed(w->name)) { hidpad_keep_gc(w); hidpad_models_changed(); return; }
         LOG("controller '%s' (HID, %04x:%04x): GameController says it lists it but has not after %g s, so it is read as HID", w->name, w->vid, w->pid, HIDPAD_GC_WAIT);
+        pad_hid_fell_add(&g_hidpads_fell, w->vid, w->pid);
         hidpad_use(w);
     });
 }
@@ -151,7 +157,8 @@ static void hidpad_gc_connected(GCController *c) {
     const char *name = c.vendorName.UTF8String; if (!name) return;
     for (hid_pad **link = &g_hidpads; *link;) {
         hid_pad *d = *link; if (!d->gc_hint || d->twin || strcmp(d->name, name)) { link = &d->next; continue; }
-        *link = d->next; LOG("controller '%s' (HID) is now a GameController controller: read through it", d->name); hidpad_detach(d); hidpad_keep_gc(d);
+        *link = d->next; LOG("controller '%s' (HID) is now a GameController controller: read through it", d->name);
+        pad_hid_fell_drop(&g_hidpads_fell, d->vid, d->pid); hidpad_detach(d); hidpad_keep_gc(d);
     }
 }
 

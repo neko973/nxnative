@@ -27,6 +27,15 @@ static const char *const pad_hid_names[16] = {"A", "B", "X", "Y", "LS", "RS", "L
 // n: the pads of the model IOKit has; listed: GameController's controllers of it; read: whether they are read that way already; due: a wait after the last change is over.
 // 1 read them, 0 do not, -1 not yet: a pad connected a moment ago may simply not be listed yet, so a model starts only after the wait, and stops at once
 static inline int pad_dupes_want(int n, int listed, int read, int due) { return n < 2 || n <= listed ? 0 : read || due ? 1 : -1; }
+// The models (vendor, product) GameController said it lists and never did in this run, so they were read as HID after pad_hid_mac.h's wait. A pad of such a model that
+// connects again (a Bluetooth drop, a pad switched off and on) is read at once: the wait would only keep its player without a controller for two more seconds. A model
+// GameController does list later leaves the set. Past PAD_HID_FELL_MAX models the wait simply runs again
+enum { PAD_HID_FELL_MAX = 8 };
+typedef struct { uint32_t model[PAD_HID_FELL_MAX]; int n; } pad_hid_fell;
+static inline uint32_t pad_hid_model(int vid, int pid) { return (uint32_t)(vid & 0xffff) << 16 | (uint32_t)(pid & 0xffff); }
+static inline int pad_hid_fell_has(const pad_hid_fell *f, int vid, int pid) { for (int i = 0; i < f->n; i++) if (f->model[i] == pad_hid_model(vid, pid)) return 1; return 0; }
+static inline void pad_hid_fell_add(pad_hid_fell *f, int vid, int pid) { if (f->n < PAD_HID_FELL_MAX && !pad_hid_fell_has(f, vid, pid)) f->model[f->n++] = pad_hid_model(vid, pid); }
+static inline void pad_hid_fell_drop(pad_hid_fell *f, int vid, int pid) { for (int i = 0; i < f->n; i++) if (f->model[i] == pad_hid_model(vid, pid)) { f->model[i] = f->model[--f->n]; return; } }
 
 // DM_HID_MAP: comma-separated NAME=usage entries over the default map (an unknown name or a usage past 32 is skipped)
 static void pad_hid_init(pad_hid *h, const char *map) {

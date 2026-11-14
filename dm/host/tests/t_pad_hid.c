@@ -39,6 +39,15 @@ int main(void) {
     CHECK(pad_dupes_want(2, 1, 0, 0) == -1); CHECK(pad_dupes_want(2, 1, 0, 1) == 1); CHECK(pad_dupes_want(2, 0, 0, 1) == 1);
     CHECK(pad_dupes_want(3, 1, 1, 0) == 1);   // a third pad of a model read already joins it without a wait
     CHECK(pad_dupes_want(1, 1, 1, 0) == 0);   // one unplugged: back to GameController
+    // a model whose wait for GameController ran out is read at once when it connects again; one GameController lists later waits again
+    pad_hid_fell fell = {0};
+    CHECK(!pad_hid_fell_has(&fell, 0x2dc8, 0x301b));
+    pad_hid_fell_add(&fell, 0x2dc8, 0x301b); pad_hid_fell_add(&fell, 0x2dc8, 0x301b); CHECK(fell.n == 1 && pad_hid_fell_has(&fell, 0x2dc8, 0x301b));
+    CHECK(!pad_hid_fell_has(&fell, 0x2dc8, 0x301c) && !pad_hid_fell_has(&fell, 0x2dc9, 0x301b));   // another product, another vendor
+    pad_hid_fell_add(&fell, 0x0f0d, 0x00c1); pad_hid_fell_drop(&fell, 0x2dc8, 0x301b);
+    CHECK(fell.n == 1 && !pad_hid_fell_has(&fell, 0x2dc8, 0x301b) && pad_hid_fell_has(&fell, 0x0f0d, 0x00c1));
+    for (int i = 0; i < 20; i++) pad_hid_fell_add(&fell, 0x1000, i);
+    CHECK(fell.n == PAD_HID_FELL_MAX && pad_hid_fell_has(&fell, 0x1000, 6) && !pad_hid_fell_has(&fell, 0x1000, 7));   // full: the rest wait again
 
     printf("t_pad_hid: %d checks, %d failed\n", checks, fails);
     return fails != 0;
