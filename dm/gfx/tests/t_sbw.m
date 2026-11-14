@@ -81,6 +81,15 @@ int main(void){@autoreleasepool{
     rc_note((uint64_t)rec,1);
     CHECK("a later timestamp restores known zero after the opaque writer",rc_value((uint64_t)rec,&x)&&x==0);
     rc_forget();atomic_store(&g_rc_complete,completed);}
+    // The commit reads the pages this submission noted, not the whole page set (Ocarina of Time commits about 30 submissions a frame): each page once, in the order taken,
+    // every one a running write after the commit, and a page of an earlier submission is not met again (upstream f63ecbd4)
+    pend_reset();{const uint64_t a=0x7300000000ull,b=0x7300100000ull;
+    sbw_note(a,16,SBW_GPU);sbw_note(b+0x10,0x1800,SBW_GPU);sbw_note(a+8,8,SBW_GPU);
+    CHECK("the submission lists each page it noted once",g_nsbw==3&&g_sbwp[g_sbw_list[0]].page==a>>12&&g_sbwp[g_sbw_list[1]].page==b>>12&&g_sbwp[g_sbw_list[2]].page==(b>>12)+1);
+    gw_commit(g_done+900);
+    CHECK("its pages are running writes",gw_live(a+0x800,a+0x810)&&gw_live(b+0x1000,b+0x1010));
+    pend_reset();sbw_note(a+0x3000,16,SBW_GPU);
+    CHECK("the next submission lists only its own pages",g_nsbw==1&&g_sbwp[g_sbw_list[0]].page==(a+0x3000)>>12);}
     pend_reset();
     printf("t_sbw: %d checks, %d failed\n",checks,failed);return failed!=0;
 }}
