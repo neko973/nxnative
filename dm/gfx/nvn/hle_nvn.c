@@ -1905,6 +1905,7 @@ counts_done:
 #define TWIN 300
 static double g_tw[6][TWIN]; static unsigned g_tn[6];
 static double g_pres_iv[TWIN]; static unsigned g_presn;   // Present interval (ms; -1 = dropped by the system, 0 = no reading)
+static double g_pres_lat[TWIN]; static uint64_t g_pres_call_ns[16];   // from the game's present call to that frame on the screen (ms; 0 = no reading), and the calls' times by present number
 static double g_pres_exp[TWIN], g_pres_exp_last;   // how long that frame should have stayed on screen (ms, pres_expect_ms); the last one for slow_emit
 // The hold (60 Hz vsyncs) each present was given, by present number. On-screen intervals are read 8 presents late, so each is judged against the holds of its own presents:
 // with the frame step at 2 vsyncs every frame stays 33.3 ms, which is not a dropped frame
@@ -2017,6 +2018,10 @@ static void tsummary(uint64_t frame) {
       task_vm_info_data_t vi; mach_msg_type_number_t vc = TASK_VM_INFO_COUNT; double fp = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &vc) == KERN_SUCCESS ? vi.phys_footprint / 1048576.0 : -1;
       double br = dm_brightness_now();   // footprint / brightness are carried on the on-screen present row: does not depend on the tick-entry observation gate (camp runs have it too)
       if (k) { qsort(v, k, sizeof *v, dcmp); LOG("[nvn] on-screen up to frame %llu: %u frames, dropped %u (discarded %u), p99 %.2f ms; footprint %.0f MiB; brightness %.2f; thermal %d", frame, k + discard, drop, discard, v[(k * 99) / 100 < k ? (k * 99) / 100 : k - 1], fp, br, dm_thermal_now()); }
+      // From the game's present call to the frame on the screen: the frame's GPU work, the wait for its refresh and whatever stands queued before it. Frames left queued after a
+      // late frame show as a median that steps up by a present period and stays (upstream 34ada028 found that on its no-link path)
+      { unsigned m = 0; double w[TWIN]; for (unsigned i = 0; i < n; i++) if (g_pres_lat[i] > 0) w[m++] = g_pres_lat[i];
+        if (m) { qsort(w, m, sizeof *w, dcmp); LOG("[nvn] present to screen up to frame %llu: p50 %.1f / p95 %.1f / min %.1f / max %.1f ms (%u frames)", frame, w[m / 2], w[(m * 95) / 100 < m ? (m * 95) / 100 : m - 1], w[0], w[m - 1], m); } }
       g_presn = 0; }
     power_line(frame);
     { static uint64_t prev[6], pf; uint64_t v[6]; mtl_vbuf_stats(&v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
@@ -2489,6 +2494,13 @@ static const int *present_crop(const int win[4], int tw, int th, int lc[4]) {
 }
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++;
+    {   // Test switch DM_TEST_HITCH=<start s>,<ms>[,<every s>]: counting from the first present, the game's present call waits that long once (or again every so many seconds),
+        // as a late frame does: for reading what the present-to-screen line does after a hitch
+        static double at = -1, ms, every; static uint64_t next;
+        if (at < 0) { at = ms = every = 0; const char *e = getenv("DM_TEST_HITCH"); if (e && sscanf(e, "%lf,%lf,%lf", &at, &ms, &every) >= 2 && at > 0 && ms > 0) next = now_ns() + (uint64_t)(at * 1e9); else at = 0; }
+        if (at > 0 && now_ns() >= next) { LOG("DM_TEST_HITCH: the game's present waits %.0f ms (present %llu)", ms, (unsigned long long)o->presents); usleep((useconds_t)(ms * 1000)); next = every > 0 ? now_ns() + (uint64_t)(every * 1e9) : UINT64_MAX; }
+    }
+    g_pres_call_ns[o->presents % 16] = now_ns();
     dm_seq("present", (uint64_t)idx, 0);
     dm_ue_cvar_tick();
     if (fps_high()) high_cap_tick(); else if (fs_t120()) t120_tick();
@@ -2617,6 +2629,8 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     if (o->presents > 9) { uint64_t n = o->presents - 8; double a_ = mtl_presented_time(n), b_ = mtl_presented_time(n - 1);
         if (a_ < 0) trow(f - 8, "@presented_ms", -1); else if (a_ > 0 && b_ > 0) trow(f - 8, "@presented_ms", (a_ - b_) * 1e3);
         g_pres_exp[g_presn % TWIN] = g_pres_exp_last = pres_expect_ms(n);
+        g_pres_lat[g_presn % TWIN] = a_ > 0 ? a_ * 1e3 - g_pres_call_ns[n % 16] / 1e6 : 0;   // presentedTime shares mach_absolute_time's base with now_ns
+        if (a_ > 0) trow(f - 8, "@pres_lat_ms", g_pres_lat[g_presn % TWIN]);
         g_pres_iv[g_presn++ % TWIN] = a_ < 0 ? -1 : (a_ > 0 && b_ > 0 ? (a_ - b_) * 1e3 : 0);
         { double iv_ = a_ < 0 ? -1 : (a_ > 0 && b_ > 0 ? (a_ - b_) * 1e3 : 0); mtl_ub_present(iv_); }   // same-process alternating measurement (DM_NVN_UB) tallies on-screen present intervals per phase; when off it is just one atomic read
         dm_perf_present(a_ < 0 ? -1 : (a_ > 0 && b_ > 0 ? (a_ - b_) * 1e3 : 0));   // on-screen present intervals are also kept in a separate ring; tsummary reports dropped frames every 300 frames (M1 criterion)
