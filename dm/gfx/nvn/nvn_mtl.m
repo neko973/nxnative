@@ -16343,6 +16343,21 @@ typedef struct { uint64_t n; double t; } pres_ent;
 static pres_ent g_pres[PRING];
 // Get the actual presentation time of the nth present (returns 0 if not ready, -1 if dropped)
 double mtl_presented_time(uint64_t n) { pres_ent e = g_pres[n % PRING]; return e.n == n ? e.t : 0; }
+// The screen's progress, for the acquire's wait without the display link (mtl_present_screen_wait, DM_PRESENT_DEPTH; upstream 34ada028): the newest ticket the system has
+// reported shown or dropped (the drawable's presented handler, on a system thread), and by ticket the game frame its present was recorded in (pq_item.frame)
+static _Atomic uint64_t g_pres_seen, g_sdw_n, g_sdw_ns, g_sdw_to;   // the newest ticket seen; the acquires that waited for the screen, their time, and those that timed out
+static int g_sdw_depth = -1;
+static uint64_t g_pres_frm[PRING];
+static _Atomic uint64_t g_rec_frame, g_seen_frame;   // the frame of the game's newest recorded present (mtl_present_recorded, the game's thread) and of the newest present shown or dropped
+void mtl_present_recorded(uint64_t frame) { uint64_t w = atomic_load(&g_rec_frame); while (frame > w && !atomic_compare_exchange_weak(&g_rec_frame, &w, frame)) {} }
+static void pres_seen(uint64_t pn) {
+    uint64_t was = atomic_load(&g_pres_seen);
+    while (pn > was && !atomic_compare_exchange_weak(&g_pres_seen, &was, pn)) {}
+    { uint64_t fr = g_pres_frm[pn % PRING], w = atomic_load(&g_seen_frame); while (fr > w && !atomic_compare_exchange_weak(&g_seen_frame, &w, fr)) {} }
+    pthread_mutex_lock(&g_pq_mu); pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
+}
+// For the log's present to screen line (hle_nvn.c): the acquires that waited for the screen, their time in ns, and those that gave up
+void mtl_present_screen_stats(uint64_t s[3]) { s[0] = atomic_load(&g_sdw_n); s[1] = atomic_load(&g_sdw_ns); s[2] = atomic_load(&g_sdw_to); }
 // Ring of the display-link tick that took each present (written on the display-link callback thread, read 8 presents later for DM_NVN_TSV, as g_pres): its target display time
 // (seconds, CACurrentMediaTime base), how long before it the callback ran, the callbacks since the previous present's (1 = no tick without a frame) and the longest interval between them
 typedef struct { uint64_t n; double target, lead_ms, gap_ms; int ticks; } link_ent;
@@ -16914,6 +16929,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     [dr addPresentedHandler:^(id<MTLDrawable> d) {   // Actual presentation time (the time this frame is really put on screen, CACurrentMediaTime base)
         CFTimeInterval tt = d.presentedTime;
         g_pres[pn % PRING] = (pres_ent){pn, tt > 0 ? tt : -1};
+        pres_seen(pn);
     }];
     // Each frame is displayed for at least one present period: when the GPU completion time jitters around a 120 Hz refresh boundary, the paired "25 ms + 8.33 ms" stutter no longer appears
     if (target_ts > 0) [dr present];
@@ -17149,6 +17165,7 @@ static void *present_main(void *arg) {
             if (ticket > g_pq_done) g_pq_done = ticket;
             pthread_cond_broadcast(&g_pq_cv);
             pthread_mutex_unlock(&g_pq_mu);
+            pres_seen(ticket);   // never reaches the screen: the screen wait must not wait for it
         }
     }
     return NULL;
@@ -17314,10 +17331,51 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
     pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0};
     if (crop) memcpy(it->crop, crop, sizeof it->crop);   // The current frame's state is enqueued with the ticket number, rather than reading the mutable window late on the present thread
     uint64_t tk = ++g_pq_in;
+    g_pres_frm[tk % PRING] = it->frame;
     if (ss) { g_snap[slot].ticket = tk; atomic_fetch_add(&g_snap_next, 1); }
     pthread_cond_broadcast(&g_pq_cv);
     pthread_mutex_unlock(&g_pq_mu);
     return ss ? 0 : tk;   // a snapshot: the game's texture is free now (its later draws come after the copy on the queue)
+}
+// Without the display link (DM_PRESENT_LINK=0) the acquire paces the game on the host's own clock (hle_nvn.c: the texture's slot time, nvn_pace), and the present thread holds
+// each frame on screen for its period (presentAfterMinimumDuration). Nothing ties the two clocks to what the screen really shows: a texture is the game's again once its
+// present is committed, not shown, so frames stand in the present queue and the layer's drawables, as many as the last late frame left there. Ocarina of Time at 60 fps on an
+// M3 Pro: 52 to 82 ms from the game's present call to the screen, at a level that moved by 15-20 ms either way at every hitch. On the Switch the acquire blocks until the
+// screen has let go of the texture. The acquire now also waits until at most DM_PRESENT_DEPTH (default 1) presents queued are not yet on screen or dropped, as the presented
+// handlers report (upstream 34ada028; 0 is the Switch's double buffering, which upstream measured at 40 fps for a 60 fps cap). The wait gives up after two periods and then
+// stays off until the handlers report again (a covered window, a screen asleep or a headless run report rarely or never). DM_PRESENT_SCREEN=0 turns it off (ab with DM_AB).
+// The display link has its own pacing and is left alone, and so are present snapshots, which run the game a frame ahead of the screen on purpose. The time waited is the
+// frame's pacing for the frame step (hle_nvn.c g_screen_at): a frame it lengthens is one the screen showed late
+uint64_t mtl_present_screen_wait(double period) {
+    static int mode = -1, silent; static uint64_t silent_seen;   // silent: the wait gave up while the newest present seen was silent_seen (0 when the screen has reported none yet)
+    if (mode < 0) {
+        const char *e = getenv("DM_PRESENT_DEPTH"); int d = e && *e ? atoi(e) : 1; g_sdw_depth = d < 0 ? 0 : d > PQ ? PQ : d;
+        mode = sw_mode("DM_PRESENT_SCREEN", 1);
+        MLOG("present: without the display link the acquire waits until at most %d present(s) queued are not yet on screen (DM_PRESENT_DEPTH; DM_PRESENT_SCREEN %s)", g_sdw_depth, mode == 1 ? "on" : mode ? "ab" : "off");
+    }
+    if (!sw_on(mode) || link_on() || g_classic || mtl_snap_on() || atomic_load(&g_present_discard)) return 0;
+    if (!(period > 0)) period = 1.0 / 60;
+    uint64_t t0 = now_ns(); int waited = 0, to = 0;
+    pthread_mutex_lock(&g_pq_mu);
+    if (silent && atomic_load(&g_pres_seen) == silent_seen) { pthread_mutex_unlock(&g_pq_mu); return 0; }   // a screen that reports nothing (a flag, not the ticket: none seen yet is silent too)
+    silent = 0;
+    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); uint64_t tmo = (uint64_t)(2 * period * 1e9);
+    ts.tv_sec += tmo / 1000000000ull; ts.tv_nsec += tmo % 1000000000ull; if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+    // Counted in the game's presents, not the replay's: g_pq_in grows only when the queue worker replays a present, a variable time after the game recorded it. A present
+    // recorded in game frame f waits until the present of frame f - depth is shown. Without recorded presents: the replay's count
+    for (;;) {
+        uint64_t rf = atomic_load(&g_rec_frame), want, have; int byframe = rf > 0;
+        if (byframe) { want = rf > (uint64_t)g_sdw_depth ? rf - (uint64_t)g_sdw_depth : 0; have = atomic_load(&g_seen_frame); }
+        else { want = g_pq_in > (uint64_t)g_sdw_depth ? g_pq_in - (uint64_t)g_sdw_depth : 0; have = atomic_load(&g_pres_seen); }
+        if (have >= want || atomic_load(&g_present_discard)) break;
+        waited = 1;
+        if (pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts) == ETIMEDOUT) { if ((byframe ? atomic_load(&g_seen_frame) : atomic_load(&g_pres_seen)) < want) { to = 1; silent = 1; silent_seen = atomic_load(&g_pres_seen); } break; }
+    }
+    pthread_mutex_unlock(&g_pq_mu);
+    uint64_t dt = now_ns() - t0;
+    if (waited) { atomic_fetch_add(&g_sdw_n, 1); atomic_fetch_add(&g_sdw_ns, dt); }
+    if (to) { atomic_fetch_add(&g_sdw_to, 1); static int nred; if (nred++ < 3) MLOG("present: the screen reported no frame for %.0f ms while %llu presents wait (newest seen %llu); the acquire stops waiting for the screen until it reports again", 2 * period * 1e3, (unsigned long long)g_pq_in, (unsigned long long)atomic_load(&g_pres_seen)); }
+    return waited ? dt : 0;
 }
 // For the layer's frame history (hle_vi.c): the ticket of the last present queued, and the last one the present queue has handed on (to the GPU and the display, or dropped)
 void mtl_present_progress(uint64_t *queued, uint64_t *done) { pthread_mutex_lock(&g_pq_mu); *queued = g_pq_in; *done = g_pq_done; pthread_mutex_unlock(&g_pq_mu); }

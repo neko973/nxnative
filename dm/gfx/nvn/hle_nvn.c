@@ -1819,6 +1819,11 @@ static uint64_t g_fs_pq;   // the first acquire's wait for its texture's present
 static uint64_t g_fs_start, g_fs_wait;   // frame step (fstep_tick): when the first acquire after a present returned (the frame's start, 0 = none yet), and its pacing wait
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
 extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
+// Without the display link, the acquire's wait until the screen shows the game's present of DM_PRESENT_DEPTH frames back (nvn_mtl.m mtl_present_screen_wait; upstream 34ada028)
+// is the pacing itself, on nearly every frame at a cap the game holds, and a frame it lengthens past its hold is one the screen showed late: it stays in the frame's time.
+// The pacer starts again from its release (g_screen_at, nvnQueuePresentTexture) instead of paying the wait back with short frames
+static _Atomic uint64_t g_screen_at;   // when the screen wait released the acquire of the frame being made (0 = it did not wait since the last present)
+uint64_t mtl_present_screen_wait(double period); void mtl_present_screen_stats(uint64_t s[3]);   // nvn_mtl.m
 NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
     win_t *o = (win_t *)w;
     dm_seq("acquire", 0, 0);
@@ -1838,6 +1843,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
             // order and drops all but the newest two, and a dropped frame frees its slot, so Donkey Kong Bananza at the 30 fps cap ran 43-65 fps of game time and dropped about 110 of every 300 frames
         else if (mtl_link_active()) { if (!link_wait(o, period ? 2 * period : 33333333ull) && wait) sleep_until_ns(at); }   // DM_PRESENT_LINK: pacing fully follows the display link (wait for the present interval's display-link ticks when running fast, go immediately when behind); our own 60 Hz clock is only the fallback when no display-link tick arrives
         else if (wait) sleep_until_ns(at);
+        if (!present_unpaced(o) && mtl_present_screen_wait(period / 1e9)) atomic_store(&g_screen_at, now_ns());   // without the display link: until the screen has caught up (DM_PRESENT_DEPTH)
         pace_ns = now_ns() - p0;
     } else {   // DM_DETCLOCK_PACE=1 (used by the screenshot gate): while the guest clock advances per frame, each frame's wall clock is no shorter than one step -- frame count and in-game time are deterministic, and the background loading thread has at least one step of wall clock available per frame;
                // When the machine is fully loaded frames only get slower and the background only gets more wall clock, so the picture captured at "the Nth frame after the message" is independent of load
@@ -2021,7 +2027,10 @@ static void tsummary(uint64_t frame) {
       // From the game's present call to the frame on the screen: the frame's GPU work, the wait for its refresh and whatever stands queued before it. Frames left queued after a
       // late frame show as a median that steps up by a present period and stays (upstream 34ada028 found that on its no-link path)
       { unsigned m = 0; double w[TWIN]; for (unsigned i = 0; i < n; i++) if (g_pres_lat[i] > 0) w[m++] = g_pres_lat[i];
-        if (m) { qsort(w, m, sizeof *w, dcmp); LOG("[nvn] present to screen up to frame %llu: p50 %.1f / p95 %.1f / min %.1f / max %.1f ms (%u frames)", frame, w[m / 2], w[(m * 95) / 100 < m ? (m * 95) / 100 : m - 1], w[0], w[m - 1], m); } }
+        static uint64_t s0[3]; uint64_t s1[3]; mtl_present_screen_stats(s1);
+        if (m) { qsort(w, m, sizeof *w, dcmp); LOG("[nvn] present to screen up to frame %llu: p50 %.1f / p95 %.1f / min %.1f / max %.1f ms (%u frames); acquires that waited for the screen %llu, %.2f ms a frame, %llu gave up", frame, w[m / 2], w[(m * 95) / 100 < m ? (m * 95) / 100 : m - 1], w[0], w[m - 1], m,
+                     (unsigned long long)(s1[0] - s0[0]), (s1[1] - s0[1]) / 1e6 / m, (unsigned long long)(s1[2] - s0[2])); }
+        memcpy(s0, s1, sizeof s0); }
       g_presn = 0; }
     power_line(frame);
     { static uint64_t prev[6], pf; uint64_t v[6]; mtl_vbuf_stats(&v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
@@ -2621,6 +2630,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     uint64_t period = present_period(o), now = dm_detclock_enabled() ? guest_ns() : now_ns();
     g_hold_ring[o->presents % 16] = (uint8_t)present_itv(o);
     nvn_pacer pc = {o->pace};
+    // The screen wait released this frame's acquire (g_screen_at): the frame's phase is the screen's, so the pacer starts from the release, not from its own earlier slot
+    // (kept on its own phase, the pacer counted the wait as lateness and paid it back with short frames)
+    { uint64_t r = atomic_exchange(&g_screen_at, 0); if (r > pc.target) pc.target = r; }
     uint64_t slot = now + nvn_pace(&pc, now, period);
     o->pace = pc.target;
     if (idx >= 0 && idx < 4) o->avail[idx] = period ? slot + period : 0;
