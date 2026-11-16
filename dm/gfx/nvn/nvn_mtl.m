@@ -8647,8 +8647,15 @@ static int pso4_on(void) {
         if (!v) MLOG("DM_PSO_MTL4=0: render pipelines are built through the MTLDevice (no bases, no pipeline archive)");
 #endif
         // Metal cannot capture pipelines made from bases ("Capturing Render pipeline specialization is not supported"), and its Metal 4 → 3 conversion for the capture layer
-        // crashes on the archives: a run that may capture GPU frames (DM_GPU_CAPTURE, MTL_CAPTURE_ENABLED) builds its pipelines through the MTLDevice
-        if (v && (getenv("DM_GPU_CAPTURE") || getenv("MTL_CAPTURE_ENABLED"))) { v = 0; MLOG("render pipelines through the MTLDevice in a run that may capture GPU frames (DM_GPU_CAPTURE / MTL_CAPTURE_ENABLED)"); }
+        // crashes on the archives: a run that Metal lets capture GPU frames builds its pipelines through the MTLDevice. Metal answers that itself (upstream ae3f16990): a trace
+        // document on the Mac when MTL_CAPTURE_ENABLED reads as a non-zero number, and the developer tools when Xcode started the run for capture. Until then the variable being
+        // set at all decided, so MTL_CAPTURE_ENABLED=0 left in a settings file turned the bases, the archive and the hybrid pipelines off: every pipeline miss stalled its frame.
+        // DM_GPU_CAPTURE alone cannot capture, so it does not decide this
+        if (v) {
+            MTLCaptureManager *m = [MTLCaptureManager sharedCaptureManager];
+            int trace = [m supportsDestination:MTLCaptureDestinationGPUTraceDocument], tools = [m supportsDestination:MTLCaptureDestinationDeveloperTools];
+            if (trace || tools) { v = 0; MLOG("render pipelines through the MTLDevice: Metal may capture GPU frames in this run (%s)", tools ? "Xcode" : TARGET_OS_IPHONE ? "MetalCaptureEnabled" : "MTL_CAPTURE_ENABLED"); }
+        }
     }
     return v;
 }
@@ -11382,7 +11389,7 @@ static void cbs_feedback(cbs_list *l, NSError *err, const char *where) {   // fr
 static inline uint64_t ub_bound(uint64_t size) { return (size + 255) & ~UINT64_C(255); }
 static uint64_t g_ub_short;
 static uint64_t ub_padded(NvShader *sh, int st, int reg, const p_bind_buf *u, uint64_t live, uint32_t need, const uint8_t *mem, __strong id<MTLBuffer> *buf) {
-    size_t off = arena_alloc(need, buf); uint8_t *d = (uint8_t *)g_cur_arena->cpu + off; uint64_t lo = u->addr, hi = lo + u->size, g; const uint8_t *c;
+    size_t off = arena_alloc(need, buf); uint64_t gpu = g_cur_arena->gpu + off; uint8_t *d = (uint8_t *)g_cur_arena->cpu + off; uint64_t lo = u->addr, hi = lo + u->size, g; const uint8_t *c;   // gpu now: ubp_get may start a new block
     if (!mem) mem = (const uint8_t *)(uintptr_t)lo;
     if (g_nubd && ubd_hits(lo, hi) && ubd_covers(lo, hi)) {   // as ubd_shadow_: the updates in order
         for (int i = 0; i < g_nubd; i++) { const ubd_ent *e = &g_ubd[i]; uint64_t a = e->lo > lo ? e->lo : lo, b = e->hi < hi ? e->hi : hi;
@@ -11392,7 +11399,7 @@ static uint64_t ub_padded(NvShader *sh, int st, int reg, const p_bind_buf *u, ui
     memset(d + live, 0, need - (size_t)live);
     uint64_t n = ++g_ub_short;
     if (!(sh->logged & 16)) { sh->logged |= 16; static int nlog; if (nlog++ < 16) MLOG("uniform slot %d of shader %s (stage %d) is bound with %llu bytes (%llu readable, a multiple of 256) and read up to byte %u at fixed offsets: it is encoded with zeros past those (%llu such encodes so far)", reg, sh->key, st, (unsigned long long)u->size, (unsigned long long)live, need, (unsigned long long)n); }
-    return g_cur_arena->gpu + off;
+    return gpu;
 }
 // A CBUF slot's GPU address, and in *use the buffer it points into: the bound uniform buffer; the shadow of inline updates deferred in this pass; an arena copy padded with zeros
 // when the binding is shorter than the shader reads it at fixed offsets (ub_padded); or the all-zero bank when nothing usable is bound. The full encode and the patch take it from here
@@ -11452,13 +11459,14 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
     NSUInteger arg_len = sh->arg_len ? sh->arg_len : sh->ae.encodedLength;
     if (reusable && args_cbuf_only(sh)) {   // only what the uniform bindings point at changed since this shader's block: copy it and write its uniform slots and their size table again
         id<MTLBuffer> ab; size_t off = arena_alloc(arg_len, &ab);
-        uint64_t *p = (uint64_t *)(void *)(g_cur_arena->cpu + off);
+        uint64_t *p = (uint64_t *)(void *)(g_cur_arena->cpu + off), ab_gpu = g_cur_arena->gpu + off;   // the block's GPU address now: cbuf_slot and cbsize_table allocate too, and an allocation that
+        // starts a new arena block moves g_cur_arena: the new block's address with this block's offset then named memory the block is not in (upstream pull request 2847)
         memcpy(p, (const uint8_t *)sh->ab_buf.contents + sh->ab_off, arg_len);
         for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; id<MTLBuffer> use;
             if (b->kind == NVN_RB_CBUF) p[b->aid] = cbuf_slot(sh, nvn_stage, b, &use);
             else if (b->kind == NVN_RB_CBSIZE) p[b->aid] = cbsize_table(nvn_stage, &use); }
-        bind_args(en, nvn_stage, metal_vertex, ab, g_cur_arena->gpu + off, off, sh->rf.abi);
-        sh->ab_buf = ab; sh->ab_gpu = g_cur_arena->gpu + off; sh->ab_off = off; g_args_ubo[nvn_stage] = 0;   // pass, base instance and pool generation are the ones the copied block was encoded for
+        bind_args(en, nvn_stage, metal_vertex, ab, ab_gpu, off, sh->rf.abi);
+        sh->ab_buf = ab; sh->ab_gpu = ab_gpu; sh->ab_off = off; g_args_ubo[nvn_stage] = 0;   // pass, base instance and pool generation are the ones the copied block was encoded for
         g_stat_args_patch++;
         return 1;
     }
