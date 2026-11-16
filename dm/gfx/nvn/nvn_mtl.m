@@ -8879,7 +8879,12 @@ static nvn_hmap g_pbase = {.klen = sizeof(pbase_key)};
 static nvn_hmap g_pbase_miss = {.klen = sizeof(pbase_key)};
 // Only callers for the same base wait on this group; unrelated bases compile in parallel.
 // compiled: its owner asked the compiler (a compile 0 owner only looks in the archive, and a waiter that needs the base builds it itself when that found none).
-@interface PbaseBuild : NSObject { @public dispatch_group_t done; id<MTLRenderPipelineState> ps; NSError *error; int compiled; } @end
+// DM_PSO_BG_LOOK (on by default; =0 off): the prediction hands its keys' base lookups to background workers (pso_bg_look), and a non-compiling pipeline call waits for another
+// thread's archive lookup of the same base (pso_build_ex)
+static int bg_look_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_PSO_BG_LOOK"); v = !(e && !strcmp(e, "0")); } return v; }
+static _Atomic uint64_t g_bgl_n, g_bgl_done, g_bgl_found, g_bgl_ns, g_bgl_kick, g_bgl_wait_n, g_bgl_wait_ns;   // lookups handed over, finished, that found a base, the workers' time, builds they admitted; calls that waited for another thread's lookup, and how long
+// looked: left once the owner has looked in the archives (or skipped them for a base known missing); found: the base that gave, set before. A compile 0 caller waits on it
+@interface PbaseBuild : NSObject { @public dispatch_group_t done, looked; id<MTLRenderPipelineState> ps, found; NSError *error; int compiled; } @end
 @implementation PbaseBuild @end
 static nvn_hmap g_pbase_pending = {.klen = sizeof(pbase_key)};
 static os_unfair_lock g_pbase_lock = OS_UNFAIR_LOCK_INIT;
@@ -9450,11 +9455,23 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
             known = hm_get_id(&g_pbase_miss, &bk) != nil;
             if (known && !compile) { os_unfair_lock_unlock(&g_pbase_lock); t_pb_nil = 4; return nil; }
             job = hm_get_id(&g_pbase_pending, &bk);
-            if (!job) { job = [PbaseBuild new]; job->done = dispatch_group_create(); dispatch_group_enter(job->done); hm_put_id(&g_pbase_pending, &bk, job); owner = 1; }
+            if (!job) {
+                job = [PbaseBuild new]; job->done = dispatch_group_create(); job->looked = dispatch_group_create();
+                dispatch_group_enter(job->done); dispatch_group_enter(job->looked); hm_put_id(&g_pbase_pending, &bk, job); owner = 1;
+            }
         }
         os_unfair_lock_unlock(&g_pbase_lock);
         if (!job || owner) break;
-        if (!compile) { t_pb_nil = 5; return nil; }   // another thread is taking or building it: no wait for the Metal compiler
+        // Another thread is taking or building it. A compile 0 call waits for that thread's archive lookup and takes the base it found, never for its compile. Returning nil
+        // at once sent a draw that came while a background worker (pso_bg_look, hybrid_get's kick) looked up its pulling base to no stand-in, and so to a wait for its own
+        // pipeline (stan69b's b830eda76, upstream pull request 2770). DM_PSO_BG_LOOK=0: nil at once, as before
+        if (!compile) {
+            if (!bg_look_on()) { t_pb_nil = 5; return nil; }
+            uint64_t w0 = bp_now(); dispatch_group_wait(job->looked, DISPATCH_TIME_FOREVER); base = job->found;
+            atomic_fetch_add_explicit(&g_bgl_wait_n, 1, memory_order_relaxed); atomic_fetch_add_explicit(&g_bgl_wait_ns, bp_now() - w0, memory_order_relaxed);
+            if (base) break;
+            t_pb_nil = 5; return nil;
+        }
         dispatch_group_wait(job->done, DISPATCH_TIME_FOREVER); base = job->ps;
         if (base) break;
         if (job->compiled) { if (e) *e = job->error; return nil; }
@@ -9466,6 +9483,7 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
         int vd = 0; for (int i = 0; i < 31 && !vd; i++) vd = bk.va[i][0] != 0;   // a vertex layout (MTLVertexFormatInvalid is 0)
         int from_run = 0; base = known || (vd && pso_layout_noarch()) ? nil : arch_lookup(b, vd, &from_run);
         uint64_t t1 = bp_now();
+        job->found = base; dispatch_group_leave(job->looked);   // before the compaction's capture below and any compile
         if (base) { g_pb_archived++; g_pt_hit_n++; g_pt_hit_ns += t1 - t0; }
         if (base && from_run && g_compact_enabled && atomic_load(&g_warm_running)) {
             // Metal can crash in materializeAirNTFromOnlineForSlice when serializing archive imports mixed with fresh bases (#342).
@@ -9575,7 +9593,14 @@ static void pso_pend_start(int slot, uint32_t gen, MTLRenderPipelineDescriptor *
         pthread_mutex_lock(&g_pp_mu); if (g_pp[slot].gen == gen) { g_pp[slot].ps = ps; g_pp[slot].done = 1; } pthread_cond_broadcast(&g_pp_cv); pthread_mutex_unlock(&g_pp_mu); g_pp_done_n++;
     } });
 }
-static int pso_pend_kick_(const pso_key *k, NvShader *vs, NvShader *fs, int spec) {
+// Admission of a build of d, the descriptor of k (spec as pso_pend_slot's). Any thread (g_pp_mu)
+static int pso_pend_kick_d(const pso_key *k, MTLRenderPipelineDescriptor *d, int spec) {
+    pthread_mutex_lock(&g_pp_mu); uint32_t gen = 0; int slot = pso_pend_slot(k, spec, &gen); if (slot >= 0) g_pp[slot].d = d; pthread_mutex_unlock(&g_pp_mu);   // d with the slot: the submit thread may take it at once
+    if (slot < 0) return 0;
+    pso_pend_start(slot, gen, d, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0));
+    return 1;
+}
+static int pso_pend_kick_(const pso_key *k, NvShader *vs, NvShader *fs, int spec) {   // the submit thread
     if (hm_get_id(&g_pso, k)) return 0;
     pthread_mutex_lock(&g_pp_mu); uint32_t gen = 0; int slot = pso_pend_slot(k, spec, &gen); pthread_mutex_unlock(&g_pp_mu);
     if (slot < 0) return 0;
@@ -9642,6 +9667,14 @@ static MTLRenderPipelineDescriptor *pso_desc_pull(const pso_key *k, NvShader *vs
     d.vertexFunction = k->border ? pf : bd_off(pf); d.vertexDescriptor = [MTLVertexDescriptor vertexDescriptor];
     return d;
 }
+// A pulling base neither made nor archived: built in the background for the pair's next miss, once (any thread). → 1 when this call started the build
+static int hy_base_kick(MTLRenderPipelineDescriptor *d) {
+    pbase_key bk; pbase_key_of(d, &bk); NSData *kd = [NSData dataWithBytes:&bk length:sizeof bk];
+    os_unfair_lock_lock(&g_hy_lock); if (!g_hy_kick_set) g_hy_kick_set = [NSMutableSet set];
+    int fresh = ![g_hy_kick_set containsObject:kd]; if (fresh) [g_hy_kick_set addObject:kd]; os_unfair_lock_unlock(&g_hy_lock);
+    if (fresh) { g_hy_kicked++; dispatch_async(pp_bg_queue(), ^{ @autoreleasepool { NSError *be = nil; (void)pso_build(d, &be); } }); }
+    return fresh;
+}
 static __unsafe_unretained id<MTLRenderPipelineState> hybrid_get(const pso_key *k, NvShader *vs, NvShader *fs) {
     __unsafe_unretained id<MTLRenderPipelineState> h = hm_get_id(&g_pso_hy, k);
     if (h) return h;
@@ -9649,10 +9682,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> hybrid_get(const pso_key *
     if (!d) return nil;
     NSError *e = nil; t_pb_nil = 0; id<MTLRenderPipelineState> ps = pso_build_ex(d, &e, 0);
     if (!ps) {   // the pulling base is neither made nor archived: build it in the background for the pair's next miss
-        pbase_key bk; pbase_key_of(d, &bk); NSData *kd = [NSData dataWithBytes:&bk length:sizeof bk];
-        os_unfair_lock_lock(&g_hy_lock); if (!g_hy_kick_set) g_hy_kick_set = [NSMutableSet set];
-        int fresh = ![g_hy_kick_set containsObject:kd]; if (fresh) [g_hy_kick_set addObject:kd]; os_unfair_lock_unlock(&g_hy_lock);
-        if (fresh) { g_hy_kicked++; dispatch_async(pp_bg_queue(), ^{ @autoreleasepool { NSError *be = nil; (void)pso_build(d, &be); } }); }
+        int fresh = hy_base_kick(d);
         static int lg = -1; if (lg < 0) { const char *ev = getenv("DM_PSO_WAITLOG"); lg = ev && !strcmp(ev, "1") ? 400 : 0; }
         if (lg > 0) { lg--; MLOG("hybrid miss: no pulling base for vertex %s fragment %s (%s; reason %d, %u samples, alpha to coverage %u, border %u, frame %llu)", vs->key, fs ? fs->key : "-", fresh ? "first miss, built in the background now" : "asked before",
                                 t_pb_nil, k->samples, k->a2c, k->border, (unsigned long long)atomic_load(&g_cur_frame)); }
@@ -9688,6 +9718,10 @@ void mtl_pso_line(char *o, size_t n) {
     if (tw > ptw) snprintf(o + o2, n > o2 ? n - o2 : 0, "; archive lookups answered under another name of a library's content: %llu so far (%llu library files loaded, %llu of them with content another has, digests %.1f ms)",
                            (unsigned long long)tw, (unsigned long long)g_twin_libs, (unsigned long long)g_twin_shared, atomic_load(&g_twin_ns) / 1e6);
     ptw = tw;
+    static uint64_t pb[6]; uint64_t vb[6] = {g_bgl_n, g_bgl_found, g_bgl_ns, g_bgl_kick, g_bgl_wait_n, g_bgl_wait_ns}; o2 = strlen(o);   // the prediction's base lookups in the background (pso_bg_look)
+    if (vb[0] > pb[0] || vb[4] > pb[4]) snprintf(o + o2, n > o2 ? n - o2 : 0, "; base lookups handed to the background %llu (found %llu, %.1f ms on the workers, builds admitted %llu), calls that waited for another thread's lookup %llu / %.1f ms",
+                                                (unsigned long long)(vb[0] - pb[0]), (unsigned long long)(vb[1] - pb[1]), (vb[2] - pb[2]) / 1e6, (unsigned long long)(vb[3] - pb[3]), (unsigned long long)(vb[4] - pb[4]), (vb[5] - pb[5]) / 1e6);
+    memcpy(pb, vb, sizeof pb);
 }
 
 // ---- Prebuild: the base of every shader pair of the game, into the pipeline archive ----
@@ -12089,13 +12123,53 @@ static void shader_prefetch_rest(void) {
 // pulling stand-in for every one of them, each an archive lookup on the submit thread, in every run again: Ocarina of Time's castle town, 160 stand-ins / 104 ms in one frame.
 // g_pp_easy: the keys this held for (submit thread; a base stays made for the process), which later predictions leave out of their candidates
 static nvn_hmap g_pp_easy = {.klen = sizeof(pso_key)};
-static int pso_base_made(const pso_key *k, NvShader *vs, NvShader *fs) {
+// *dp: the key's descriptor (nil without Metal 4 bases); *bkp: its base's key, *bkp_ok set when it has one (not a whole pipeline, legal attachments)
+static int pso_base_made_d(const pso_key *k, NvShader *vs, NvShader *fs, MTLRenderPipelineDescriptor **dp, pbase_key *bkp, int *bkp_ok) {
+    if (dp) *dp = nil; if (bkp_ok) *bkp_ok = 0;
     pso4_init(); if (!g_comp4) return 0;
-    MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0);
+    MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0); if (dp) *dp = d;
     if ([d.label isEqualToString:PSO_WHOLE] || !pso_ds_valid((uint32_t)d.depthAttachmentPixelFormat, (uint32_t)d.stencilAttachmentPixelFormat)) return 0;
-    pbase_key bk; pbase_key_of(d, &bk);
+    pbase_key bk; pbase_key_of(d, &bk); if (bkp) { *bkp = bk; *bkp_ok = 1; }
     os_unfair_lock_lock(&g_pbase_lock); int made = hm_get_id(&g_pbase, &bk) != nil; os_unfair_lock_unlock(&g_pbase_lock);
     return made;
+}
+static int pso_base_made(const pso_key *k, NvShader *vs, NvShader *fs) { return pso_base_made_d(k, vs, fs, NULL, NULL, NULL); }
+// The bases of predicted keys, looked up in the background (DM_PSO_BG_LOOK; stan69b's ddea34fd9, upstream pull request 2677). The prediction made the pulling stand-in of every
+// proposed key whose base was not made yet, on the submit thread: an archive lookup and a specialization each, to learn whether its draw would wait. Most take a few
+// milliseconds, but while bases compile in the background single lookups take tens to hundreds (upstream issue 2827): in 52 minutes of play on an M3 Pro the predictions took
+// 4.2 s of the submit thread, 340 ms for six in one frame and 209 ms for one in another. A lookup's lasting result is the base, and a base found (g_pbase) or known missing
+// (g_pbase_miss) holds for the process whichever thread looked: so the prediction hands each proposed key's lookup to a worker. It looks up the base of the key's own
+// pipeline, which its draw tries first, else its pulling base; with neither the draw will wait, so the worker admits the key's build (a draw met at once whatever runs, a
+// guess within the prediction's budget) and has the pulling base built for the pair's next miss, as hybrid_get does. The draw then finds its base made and only
+// specializes it, or takes its stand-in from the pulling base; one that comes while the worker holds the lookup waits for that lookup alone (pso_build_ex).
+// g_pp_looked: the bases handed over (submit thread), by the key's own base: a base serves every key that shares it and is looked up once.
+// Workers: one serial queue per performance core, at most 4, at user-initiated QoS, for draws that may come in the same frame
+static nvn_hmap g_pp_looked = {.klen = sizeof(pbase_key)};
+static os_unfair_lock g_bgl_lock = OS_UNFAIR_LOCK_INIT; static uint64_t g_bgl_gen, g_bgl_admit_gen; static int g_bgl_admit_n;   // the prediction a lookup came from, and the guesses admitted for it
+static dispatch_queue_t bgl_queue(void) {
+    static dispatch_queue_t q[4]; static int n; static _Atomic unsigned rr; static dispatch_once_t once;
+    dispatch_once(&once, ^{ int pc = 0; size_t sz = sizeof pc; if (sysctlbyname("hw.perflevel0.physicalcpu", &pc, &sz, NULL, 0) || pc < 2) pc = 2;
+        n = pc > 4 ? 4 : pc;
+        for (int i = 0; i < n; i++) q[i] = dispatch_queue_create("dm.nvn.pso-look", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0)); });
+    return q[atomic_fetch_add(&rr, 1) % (unsigned)n];
+}
+static int bgl_admit(uint64_t gen) {   // one more guess for prediction gen, within its budget
+    os_unfair_lock_lock(&g_bgl_lock);
+    if (gen != g_bgl_admit_gen) { g_bgl_admit_gen = gen; g_bgl_admit_n = 0; }
+    int ok = g_bgl_admit_n < PSO_PREDICT_BUDGET; g_bgl_admit_n += ok;
+    os_unfair_lock_unlock(&g_bgl_lock);
+    return ok;
+}
+static void pso_bg_look(const pso_key *k, MTLRenderPipelineDescriptor *full, MTLRenderPipelineDescriptor *pull, int spec) {   // the submit thread; spec: pso_pend_kick_d's
+    pso_key kc = *k; uint64_t gen = g_bgl_gen; atomic_fetch_add_explicit(&g_bgl_n, 1, memory_order_relaxed);
+    dispatch_async(bgl_queue(), ^{ @autoreleasepool {
+        uint64_t t0 = bp_now(); NSError *e = nil;
+        id<MTLRenderPipelineState> ps = pso_build_ex(full, &e, 0);
+        if (!ps && pull) { ps = pso_build_ex(pull, &e, 0); if (!ps) (void)hy_base_kick(pull); }
+        if (ps) atomic_fetch_add_explicit(&g_bgl_found, 1, memory_order_relaxed);
+        else if ((spec == 2 || bgl_admit(gen)) && pso_pend_kick_d(&kc, full, spec)) atomic_fetch_add_explicit(&g_bgl_kick, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_bgl_ns, bp_now() - t0, memory_order_relaxed); atomic_fetch_add_explicit(&g_bgl_done, 1, memory_order_relaxed);
+    } });
 }
 static void pso_predict_rest_(void);
 static void pso_predict_rest(void) { uint64_t t0 = bp_now(); shader_prefetch_rest(); pso_predict_rest_(); g_pt_pred_n++; g_pt_pred_ns += bp_now() - t0; }
@@ -12149,12 +12223,22 @@ static void pso_predict_rest_(void) {
     // pipelines a predicted draw whose pulling stand-in is ready (made here, from its base made or archived: the work its draw would do) will not wait, and builds its own pipeline
     // on demand (pso_pend_demand). The rest are draws that would wait (a pair whose pulling base is not made yet): each draw met with its attachments as they are (qa) is
     // admitted, then at most PSO_PREDICT_BUDGET guesses with other depth / stencil attachments (qb)
-    int admitted = 0, hy = hybrid_on();
+    // With DM_PSO_BG_LOOK a key whose base is not made has its lookup handed to the background (pso_bg_look), which admits its build when its draw would wait, by the same
+    // rule; the submit thread makes no stand-in and asks no archive for it
+    int admitted = 0, hy = hybrid_on(), bgl = hy && bg_look_on();
+    if (bgl) g_bgl_gen++;
     for (int i = 0; i < na + nb && (i < na || admitted < PSO_PREDICT_BUDGET); i++) {
         const pso_key *qk = i < na ? &qa[i].k : &qb[i - na].k; NvShader *qv = (__bridge NvShader *)(i < na ? qa[i].vs : qb[i - na].vs), *qf = (__bridge NvShader *)(i < na ? qa[i].fs : qb[i - na].fs);
         if (hm_get_id(&g_pso, qk)) continue;
-        if (pso_base_made(qk, qv, qf)) { hm_put_id(&g_pp_easy, qk, NSNull.null); continue; }
-        if (hy && hybrid_get(qk, qv, qf) != nil) continue;
+        MTLRenderPipelineDescriptor *d = nil; pbase_key bk; int bk_ok = 0;
+        if (pso_base_made_d(qk, qv, qf, &d, &bk, &bk_ok)) { hm_put_id(&g_pp_easy, qk, NSNull.null); continue; }
+        if (bgl && d && bk_ok) {
+            if (hm_get_id(&g_pp_looked, &bk)) continue;   // its base is being looked up, or was: found, it is made by now; missing, its build was admitted or its draw waits
+            hm_put_id(&g_pp_looked, &bk, NSNull.null);
+            pso_bg_look(qk, d, qv->has_pull ? pso_desc_pull(qk, qv, qf) : nil, i < na ? 2 : 1);
+            continue;
+        }
+        if (hy && hybrid_get(qk, qv, qf) != nil) continue;   // a whole pipeline (no base to look up), or the switch off: its stand-in, on this thread
         if (i < na) pso_pend_kick_next(qk, qv, qf);
         else admitted += pso_pend_kick(qk, qv, qf);
     }
