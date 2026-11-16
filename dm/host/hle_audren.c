@@ -98,6 +98,7 @@ typedef struct {
     _Atomic uint64_t frames, nonsilent, updates, renders, catchups;
     uint64_t last_r; int updated;            // the render count at the last update, once there was one
     int16_t cq[CQ][FRAME_MAX * 2]; int cq_n[CQ]; _Atomic uint32_t cq_head, cq_tail;   // output queue of catch-up frames
+    uint64_t frame_seq, cq_seq[CQ], played_seq; _Atomic uint64_t swapped;   // each frame's place in the order rendered, the last one handed to the output, and frames handed over behind a later one
     pthread_mutex_t cq_mu; pthread_cond_t cq_cv;   // the render thread signals each frame it takes off the queue (catch-up pacing)
     int sink_logged;
     int32_t up_buf[2 * (15 + FRAME_MAX)]; uint32_t up_pos;   // up_3_2's last samples and position
@@ -140,8 +141,11 @@ static void render_main(void *arg) {
         if (!nfree) break;
         const int16_t *src; int got;
         uint32_t h = atomic_load(&a->cq_head);
-        if (h != atomic_load(&a->cq_tail)) { src = a->cq[h % CQ]; got = a->cq_n[h % CQ]; atomic_store(&a->cq_head, h + 1); cq_popped(a); }   // play queued catch-up output first
-        else { a->frame_n = 0; exec(a->handle[0], a->handle[1]); src = a->frame; got = a->frame_n; }   // SDK: generate commands → CPU processing (output taken in the host takeover) → signal the game's renderer event
+        uint64_t seq;
+        if (h != atomic_load(&a->cq_tail)) { src = a->cq[h % CQ]; got = a->cq_n[h % CQ]; seq = a->cq_seq[h % CQ]; atomic_store(&a->cq_head, h + 1); cq_popped(a); }   // play queued catch-up output first
+        else { a->frame_n = 0; exec(a->handle[0], a->handle[1]); src = a->frame; got = a->frame_n; seq = a->frame_seq; }   // SDK: generate commands → CPU processing (output taken in the host takeover) → signal the game's renderer event
+        if (got && seq < a->played_seq) { uint64_t w = atomic_fetch_add(&a->swapped, 1) + 1; if (w <= 3) LOG("audren: renderer %d: frame %llu handed to the output after frame %llu (%llu so far)", ar_index(a), (unsigned long long)seq, (unsigned long long)a->played_seq, (unsigned long long)w); }
+        if (got) a->played_seq = seq;
         int n = got ? got : 240;
         gbuf *b = free_list[--nfree];
         if (got) memcpy(b->ptr, src, (size_t)n * 4); else memset(b->ptr, 0, (size_t)n * 4);
@@ -406,13 +410,22 @@ static int capture(ar_t *a, const uint8_t *cl, size_t len, int16_t *dst) {
                 st[2 * s] = l; st[2 * s + 1] = r;
             }
             uint32_t nout = rate == 48000 ? samples : up_3_2(a, st, samples, st);
-            uint64_t loud = 0;
+            uint64_t loud = 0; uint32_t clip = 0; int32_t peak = 0;
             for (uint32_t s = 0; s < 2 * nout; s++) {
-                int32_t v = st[s]; v = v > 32767 ? 32767 : v < -32768 ? -32768 : v;
+                int32_t v = st[s]; int32_t m = v < 0 ? -(v + 1) : v; if (m > peak) peak = m;
+                if (v > 32767) { v = 32767; clip++; } else if (v < -32768) { v = -32768; clip++; }
                 dst[s] = (int16_t)v; loud |= (uint64_t)v;
             }
+            // Samples past full scale are cut flat (heard as crackling): counted with the frames that had any and the highest level asked for, per minute of sound
+            static uint64_t clip_n, clip_frames; static int32_t clip_peak;   // under g_render_mu
+            if (clip) { clip_n += clip; clip_frames++; } if (peak > clip_peak) clip_peak = peak;
             atomic_fetch_add(&a->frames, 1); if (loud) atomic_fetch_add(&a->nonsilent, 1);
-            uint64_t f = atomic_load(&a->frames); if (f == 200 || f % 12000 == 0) LOG("audren: renderer %d rendered %llu frames, %llu of them not silent", ar_index(a), (unsigned long long)f, (unsigned long long)atomic_load(&a->nonsilent));
+            uint64_t f = atomic_load(&a->frames);
+            if (f == 200 || f % 12000 == 0) {
+                LOG("audren: renderer %d rendered %llu frames, %llu of them not silent; since the last line %llu samples in %llu frames were past full scale and cut flat, highest level %.2f of full scale (%u channels mixed to 2)", ar_index(a), (unsigned long long)f,
+                    (unsigned long long)atomic_load(&a->nonsilent), (unsigned long long)clip_n, (unsigned long long)clip_frames, clip_peak / 32768.0, (unsigned)k);
+                clip_n = clip_frames = 0; clip_peak = 0;
+            }
             return (int)nout;
         }
         c += size;
@@ -466,7 +479,7 @@ static int update_lock(size_t *off, int *os_mutex) {
     LOG("[RED] audren: no update lock read off AudioRenderSystem::Update or UpdateImpl: keeping +%#zx, where command generation may race the game's RequestUpdate", *off);
     return 0;
 }
-static Result render_once(ar_t *a, uint8_t *sys, int16_t *dst, int *nout) {
+static Result render_once(ar_t *a, uint8_t *sys, int16_t *dst, int *nout, uint64_t *seq) {
     static int (*mode)(void *), (*device)(void *); static uint8_t *(*cbuf)(void *); static size_t (*cbsz)(void *), (*gen)(void *, void *, size_t);
     static span_t (*gen20)(void *, void *, size_t); static size_t mu_off;
     static void (*tmax)(void *, uint32_t), (*setup)(void *, const void *, size_t), (*process)(void *), (*lock)(void *), (*unlock)(void *);
@@ -496,13 +509,13 @@ static Result render_once(ar_t *a, uint8_t *sys, int16_t *dst, int *nout) {
     if (gen20) { span_t sp = gen20(sys, *(uint8_t **)(sys + 0xf8), *(size_t *)(sys + 0x100)); cl = sp.p; n = sp.n; }
     else { cl = cbuf(sys); n = gen(sys, cl, cbsz(sys)); }
     unlock(sys + mu_off);
-    atomic_fetch_add(&a->renders, 1);
+    uint64_t rs = atomic_fetch_add(&a->renders, 1) + 1; if (seq) *seq = rs;
     uint64_t proc[16] __attribute__((aligned(16))) = {0};   // CommandListProcessor (0x58 bytes; 0x60 in SDK 21, whose Process reads +0x58)
     tmax(proc, 0xffffffffu); setup(proc, cl, n); process(proc);
     if (dst) *nout = capture(a, cl, n, dst);
     // render time per frame (budget: 5 ms per frame): mean / max every 2000 frames
     static uint64_t sum, mx, cnt; uint64_t d = now_ns() - t0; sum += d; if (d > mx) mx = d;
-    if (++cnt == 2000) { LOG("audren: render time mean %.2f ms / max %.2f ms (5 ms budget per frame, last 2000 frames); catch-up renders so far %llu", sum / 2000 / 1e6, mx / 1e6, (unsigned long long)atomic_load(&a->catchups)); sum = mx = cnt = 0; }
+    if (++cnt == 2000) { LOG("audren: render time mean %.2f ms / max %.2f ms (5 ms budget per frame, last 2000 frames); catch-up renders so far %llu, frames handed to the output out of order %llu", sum / 2000 / 1e6, mx / 1e6, (unsigned long long)atomic_load(&a->catchups), (unsigned long long)atomic_load(&a->swapped)); sum = mx = cnt = 0; }
     pthread_mutex_unlock(&g_render_mu);
     return RES_OK;
 }
@@ -530,7 +543,7 @@ static Result ar_exec(uint8_t *sys) {
     if (a && !a->sys) { pthread_mutex_lock(&g_ar_mu); a->sys = sys; pthread_mutex_unlock(&g_ar_mu); }
     if (!a) a = ar_of_sys(sys);
     if (!a) { LOG("[RED] audren: a render of a renderer the host did not open"); return RES_FAIL; }
-    return render_once(a, sys, a->frame, &a->frame_n);
+    return render_once(a, sys, a->frame, &a->frame_n, &a->frame_seq);
 }
 HLE_FORCE("_ZN2nn5audio6server24AudioRendererManagerImpl17AudioRendererImpl29ExecuteAudioRendererRenderingEv", "render one frame manually: SDK generates commands + CPU processing, the host takes the DeviceSink output",
           Result, h_ar_ImplExec, uint8_t *impl) { return ar_exec(impl + impl_sys_off()); }
@@ -566,8 +579,8 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "renderer
             while (atomic_load(&a->open) && t - atomic_load(&a->cq_head) >= CQ && !pthread_cond_timedwait(&a->cq_cv, &a->cq_mu, &dl)) {}
             pthread_mutex_unlock(&a->cq_mu);
         }
-        if (t - atomic_load(&a->cq_head) < CQ) { render_once(a, sys, a->cq[t % CQ], &a->cq_n[t % CQ]); atomic_store(&a->cq_tail, t + 1); }
-        else render_once(a, sys, NULL, NULL);   // still full (the output stopped): render anyway, output discarded
+        if (t - atomic_load(&a->cq_head) < CQ) { render_once(a, sys, a->cq[t % CQ], &a->cq_n[t % CQ], &a->cq_seq[t % CQ]); atomic_store(&a->cq_tail, t + 1); }
+        else render_once(a, sys, NULL, NULL, NULL);   // still full (the output stopped): render anyway, output discarded
     }
     static int tr = -1; if (tr < 0) tr = getenv("DM_AUDREN_TRACE") != NULL;
     if (tr && u < 200) LOG("audren update #%llu t=%.3f ms, %llu frames rendered since the last update", (unsigned long long)u, now_ns() / 1e6, (unsigned long long)(atomic_load(&a->renders) - (a->updated ? a->last_r : 0)));
