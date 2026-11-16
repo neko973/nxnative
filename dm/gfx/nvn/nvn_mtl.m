@@ -6292,8 +6292,50 @@ static NSString *lib_name(NSString *path) {
     NSString *dir = g_msl_dir ? [g_msl_dir stringByAppendingString:@"/"] : nil;
     return dir && [path hasPrefix:dir] ? [path substringFromIndex:dir.length] : path.lastPathComponent;
 }
+// Libraries of the same content under several names. Two shaders whose translated code came out the same have two files (Ocarina of Time: 3,107 of its 44,314 _b libraries and 1,154
+// of its 11,485 pulling ones have the bytes of another), and Metal hands out one function object per function content (FnVariant below), so the descriptor noted for that function
+// (fn4_note) names whichever of those libraries was loaded last. The archive index knows a pipeline by its libraries' names (arch_key), so a base the prebuild saved under a pair's
+// own names was asked for under a twin's name and not found, though Metal, which matches a library by its content, would have given it: on a first visit of Ocarina of Time's ranch
+// 95 pairs in 3.2 minutes, 92 of them with such a library, each compiled again in the background while its draws waited (196 draws, 6.9 s). So every library loaded from a file is
+// noted by a digest of its bytes (lib_dig), and a lookup the index has no file for asks again under the other names its libraries' content was loaded as (arch_lookup): the shader's own
+// name is among them, its own file having been loaded. g_twin_libs: names noted, g_twin_shared: those of them whose content has another name, g_twin_ns: the digests' time,
+// g_twin_found: lookups such a name answered
+@interface LibTwins : NSObject { @public NSMutableArray<NSString *> *names; } @end
+@implementation LibTwins @end
+static char g_lib_twin_tag; static NSMutableDictionary<NSData *, LibTwins *> *g_lib_twins; static os_unfair_lock g_lib_twins_lock = OS_UNFAIR_LOCK_INIT;
+static _Atomic uint64_t g_twin_libs, g_twin_shared, g_twin_ns, g_twin_found;
+static __thread uint8_t t_lib_dig[CC_SHA256_DIGEST_LENGTH]; static __thread int t_lib_dig_ok;   // the digest of the file lib_from_file_ just read on this thread
+// The digest takes the file's length and its first 4 KiB, not every byte: a library's head lists its functions with a hash of each one's code, and Metal reads that page to load
+// the library anyway. Over Ocarina of Time's 55,799 libraries the two give the same groups, file for file; were two files to agree there and differ further on, a lookup would ask
+// the index one more question (Metal compares the content itself). Every byte took 0.77 ms a library, the pages read from the disk for it: 26.6 s of thread time for the 34,374
+// libraries of a start and its first 3 minutes; the first and the last 4 KiB still 17.5 s
+static void lib_dig(const void *p, size_t n) {
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), len = n;
+    CC_SHA256_CTX c; CC_SHA256_Init(&c); CC_SHA256_Update(&c, &len, sizeof len); CC_SHA256_Update(&c, p, (CC_LONG)(n < 4096 ? n : 4096));
+    CC_SHA256_Final(t_lib_dig, &c); t_lib_dig_ok = 1;
+    atomic_fetch_add_explicit(&g_twin_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0, memory_order_relaxed);
+}
+static void lib_twin_note(id<MTLLibrary> lib, NSString *name) {
+    NSData *dg = [NSData dataWithBytes:t_lib_dig length:16];
+    os_unfair_lock_lock(&g_lib_twins_lock);
+    if (!g_lib_twins) g_lib_twins = [NSMutableDictionary dictionary];
+    LibTwins *t = g_lib_twins[dg]; if (!t) { t = [LibTwins new]; t->names = [NSMutableArray array]; g_lib_twins[dg] = t; }
+    if (![t->names containsObject:name]) { [t->names addObject:name]; g_twin_libs++; if (t->names.count > 1) g_twin_shared += t->names.count == 2 ? 2 : 1; }
+    os_unfair_lock_unlock(&g_lib_twins_lock);
+    objc_setAssociatedObject(lib, &g_lib_twin_tag, t, OBJC_ASSOCIATION_RETAIN);
+}
+static NSArray<NSString *> *lib_twin_names(id<MTLLibrary> lib) {   // the names lib's content has been loaded under when there are several, else nil
+    LibTwins *t = lib ? objc_getAssociatedObject(lib, &g_lib_twin_tag) : nil;
+    if (!t) return nil;
+    os_unfair_lock_lock(&g_lib_twins_lock); NSArray<NSString *> *a = t->names.count > 1 ? [t->names copy] : nil; os_unfair_lock_unlock(&g_lib_twins_lock);
+    return a;
+}
 static id<MTLLibrary> lib_from_file_(NSString *path, NSError **err);
-static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) { return lib_tag(lib_from_file_(path, err), lib_name(path)); }
+static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
+    t_lib_dig_ok = 0; NSString *name = lib_name(path); id<MTLLibrary> lib = lib_tag(lib_from_file_(path, err), name);
+    if (lib && name && t_lib_dig_ok) lib_twin_note(lib, name);
+    return lib;
+}
 static id<MTLLibrary> lib_from_file_(NSString *path, NSError **err) {
     int fd = open(path.fileSystemRepresentation, O_RDONLY); struct stat st;
     if (fd < 0) {   // not in the folder: the library's image, whose one descriptor is shared, and only this file's pages are mapped
@@ -6301,6 +6343,7 @@ static id<MTLLibrary> lib_from_file_(NSString *path, NSError **err) {
         if (x && msl_image_map(img, x, &f)) {
             void *base = f.base; size_t base_len = f.base_len;
             dispatch_data_t d = dispatch_data_create(f.data, f.size, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ munmap(base, base_len); });
+            lib_dig(f.data, f.size);
             return [g_dev newLibraryWithData:d error:err];
         }
         if (!x) errno = open_errno;
@@ -6309,6 +6352,7 @@ static id<MTLLibrary> lib_from_file_(NSString *path, NSError **err) {
     size_t len = (size_t)st.st_size; void *m = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0); close(fd);
     if (m == MAP_FAILED) { if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"mmap failed %@", path]}]; return nil; }
     dispatch_data_t d = dispatch_data_create(m, len, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ munmap(m, len); });
+    lib_dig(m, len);
     return [g_dev newLibraryWithData:d error:err];
 }
 // NVN depth mode (nvnDeviceSetDepthMode): every vertex library has two entry points (dmsh_entry.py vs_depth): main0 rewrites z for the GL convention (near = -w, NVN's default),
@@ -8677,11 +8721,11 @@ static dispatch_queue_t g_arch_q; static _Atomic int g_arch_new, g_arch_new_vd, 
 // share a key: the index names one's file for both, and the other misses there, is compiled and written again at every start. A key the index names a file for is looked up in that
 // file alone: a miss there (the file's binaries no longer fit this system, a library changed under the same name) compiles it, and its new file, newer, holds it from the next start
 // on. 0: no key (a function from a library with no name: the diagnostic overrides, embedded kernels), looked up in the files without a complete index
-typedef struct { CC_SHA256_CTX c; int ok; } arch_kb;
+typedef struct { CC_SHA256_CTX c; int ok, fi; __unsafe_unretained NSString *as[3]; } arch_kb;   // fi: the descriptor's functions keyed so far; as: the library name to key each under instead of its own (arch_key_as)
 static void akb_u(arch_kb *k, uint64_t v) { CC_SHA256_Update(&k->c, &v, sizeof v); }
 static void akb_s(arch_kb *k, NSString *s) { const char *u = s.UTF8String ?: ""; size_t n = strlen(u); akb_u(k, n); CC_SHA256_Update(&k->c, u, (CC_LONG)n); }
 static void akb_size(arch_kb *k, MTLSize s) { akb_u(k, s.width); akb_u(k, s.height); akb_u(k, s.depth); }
-static void akb_fn(arch_kb *k, MTL4FunctionDescriptor *f) {
+static void akb_fn_(arch_kb *k, MTL4FunctionDescriptor *f, NSString *as) {
     if (!f) { akb_u(k, 0); return; }
     if ([f isKindOfClass:MTL4SpecializedFunctionDescriptor.class]) {
         // its constant values by their values: Metal has no getter for them, and the descriptor copies the set it is given, but the set's class compares, hashes and describes them
@@ -8690,16 +8734,17 @@ static void akb_fn(arch_kb *k, MTL4FunctionDescriptor *f) {
         MTL4SpecializedFunctionDescriptor *s = (MTL4SpecializedFunctionDescriptor *)f; MTLFunctionConstantValues *cv = s.constantValues;
         NSString *desc = cv.description; NSRange nl = [desc rangeOfString:@"\n"];
         akb_u(k, 2); akb_u(k, cv ? cv.hash : 0); akb_s(k, cv ? (nl.location != NSNotFound ? [desc substringFromIndex:nl.location] : @"?") : @"(none)");
-        akb_s(k, s.specializedName); akb_fn(k, s.functionDescriptor); return;
+        akb_s(k, s.specializedName); akb_fn_(k, s.functionDescriptor, as); return;
     }
     if ([f isKindOfClass:MTL4LibraryFunctionDescriptor.class]) {
         MTL4LibraryFunctionDescriptor *l = (MTL4LibraryFunctionDescriptor *)f;
-        NSString *lib = l.library ? objc_getAssociatedObject(l.library, &g_lib_tag) : nil;
+        NSString *lib = as ?: l.library ? objc_getAssociatedObject(l.library, &g_lib_tag) : nil;
         if (!lib || !l.name) { k->ok = 0; return; }
         akb_u(k, 1); akb_s(k, lib); akb_s(k, l.name); return;
     }
     k->ok = 0;   // another kind of function descriptor: no name to give it
 }
+static void akb_fn(arch_kb *k, MTL4FunctionDescriptor *f) { NSString *as = k->fi < 3 ? k->as[k->fi] : nil; k->fi++; akb_fn_(k, f, as); }   // the descriptor's functions in order: vertex, fragment; object, mesh, fragment; compute
 static void akb_linked(arch_kb *k, MTL4StaticLinkingDescriptor *s) { if (s.functionDescriptors.count || s.privateFunctionDescriptors.count || s.groups.count) k->ok = 0; }   // the host links none
 static void akb_colors(arch_kb *k, MTL4RenderPipelineColorAttachmentDescriptorArray *ca) {
     for (NSUInteger i = 0; i < 8; i++) {
@@ -8708,8 +8753,10 @@ static void akb_colors(arch_kb *k, MTL4RenderPipelineColorAttachmentDescriptorAr
         akb_u(k, a.rgbBlendOperation); akb_u(k, a.sourceAlphaBlendFactor); akb_u(k, a.destinationAlphaBlendFactor); akb_u(k, a.alphaBlendOperation);
     }
 }
-static uint64_t arch_key(MTL4PipelineDescriptor *d) {
+// as: nil, or a library name for each of the descriptor's functions in akb_fn's order to key it under instead of its library's own (nil entries keep their own)
+static uint64_t arch_key_as(MTL4PipelineDescriptor *d, NSString *const __unsafe_unretained *as) {
     arch_kb k = {.ok = 1}; CC_SHA256_Init(&k.c);
+    for (int i = 0; as && i < 3; i++) k.as[i] = as[i];
     if ([d isKindOfClass:MTL4RenderPipelineDescriptor.class]) {
         MTL4RenderPipelineDescriptor *r = (MTL4RenderPipelineDescriptor *)d;
         akb_u(&k, 'R'); akb_fn(&k, r.vertexFunctionDescriptor); akb_fn(&k, r.fragmentFunctionDescriptor);
@@ -8741,6 +8788,20 @@ static uint64_t arch_key(MTL4PipelineDescriptor *d) {
     uint8_t h[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_Final(h, &k.c);
     uint64_t v; memcpy(&v, h, sizeof v);
     return v ? v : 1;   // 0 means no key
+}
+static uint64_t arch_key(MTL4PipelineDescriptor *d) { return arch_key_as(d, NULL); }
+// The library of each of d's functions, in akb_fn's order → how many
+static id<MTLLibrary> arch_fn_lib(MTL4FunctionDescriptor *f) {
+    MTL4FunctionDescriptor *l = [f isKindOfClass:MTL4SpecializedFunctionDescriptor.class] ? ((MTL4SpecializedFunctionDescriptor *)f).functionDescriptor : f;
+    return [l isKindOfClass:MTL4LibraryFunctionDescriptor.class] ? ((MTL4LibraryFunctionDescriptor *)l).library : nil;
+}
+static int arch_fn_libs(MTL4PipelineDescriptor *d, __strong id<MTLLibrary> *lib) {
+    if ([d isKindOfClass:MTL4RenderPipelineDescriptor.class]) { MTL4RenderPipelineDescriptor *r = (MTL4RenderPipelineDescriptor *)d;
+        lib[0] = arch_fn_lib(r.vertexFunctionDescriptor); lib[1] = arch_fn_lib(r.fragmentFunctionDescriptor); return 2; }
+    if ([d isKindOfClass:MTL4MeshRenderPipelineDescriptor.class]) { MTL4MeshRenderPipelineDescriptor *m = (MTL4MeshRenderPipelineDescriptor *)d;
+        lib[0] = arch_fn_lib(m.objectFunctionDescriptor); lib[1] = arch_fn_lib(m.meshFunctionDescriptor); lib[2] = arch_fn_lib(m.fragmentFunctionDescriptor); return 3; }
+    if ([d isKindOfClass:MTL4ComputePipelineDescriptor.class]) { lib[0] = arch_fn_lib(((MTL4ComputePipelineDescriptor *)d).computeFunctionDescriptor); return 1; }
+    return 0;
 }
 // <file>.keys: "DMPSOIX1", then complete (1: every pipeline in the file has its key here) and the count (two uint32), then the keys (uint64 each)
 static NSString *arch_keys_path(NSString *archive) { return [archive.stringByDeletingPathExtension stringByAppendingString:@".keys"]; }
@@ -8779,6 +8840,18 @@ static id arch_lookup(MTL4PipelineDescriptor *d, int plain, int *from_run) {
         id ps = ask(named);
         if (ps && from_run) *from_run = arch_compact_takes(named);
         return ps;
+    }
+    if (k) {   // no file under these names: the other names the same libraries' content was loaded under (lib_twin_names), each combination, the index naming the file as before
+        id<MTLLibrary> lib[3] = {nil, nil, nil}; NSArray<NSString *> *alt[3] = {nil, nil, nil}; int nf = arch_fn_libs(d, lib), any = 0;
+        for (int i = 0; i < nf; i++) { alt[i] = lib_twin_names(lib[i]); any |= alt[i] != nil; }
+        NSUInteger n0 = alt[0].count ?: 1, n1 = alt[1].count ?: 1, n2 = alt[2].count ?: 1, total = any ? MIN(n0 * n1 * n2, (NSUInteger)64) : 0;
+        for (NSUInteger c = 0; c < total; c++) {
+            __unsafe_unretained NSString *as[3] = {alt[0] ? alt[0][c % n0] : nil, alt[1] ? alt[1][c / n0 % n1] : nil, alt[2] ? alt[2][c / (n0 * n1) % n2] : nil};
+            uint64_t k2 = arch_key_as(d, as);
+            id<MTL4Archive> a = k2 && k2 != k ? (__bridge id<MTL4Archive>)nvn_hm_get(&g_arch_ix, &k2) : nil;
+            id ps = a ? ask(a) : nil;
+            if (ps) { atomic_fetch_add_explicit(&g_twin_found, 1, memory_order_relaxed); if (from_run) *from_run = arch_compact_takes(a); return ps; }
+        }
     }
     if (!plain) for (id<MTL4Archive> a in g_arch4p) { id ps = ask(a); if (ps) return ps; }
     for (id<MTL4Archive> a in g_arch4) { id ps = ask(a); if (ps) { if (from_run) *from_run = arch_compact_takes(a); return ps; } }
@@ -9339,6 +9412,8 @@ static MTL4RenderPipelineDescriptor *spec_desc(id base, _Atomic int *own) {   //
 static _Atomic int g_spec_own;
 // The pipeline pso_desc describes: its base (built, from the archive or already made), then specialized with its colour state. Called on several threads.
 // compile 0: nil on an archive miss (*e untouched), with no MTLDevice fallback. Prewarm compaction may still refresh a found base for serialization.
+static __thread int t_pb_nil;   // why the last compile 0 call on this thread gave nil: 1 formats, 2 built whole, 3 no Metal 4 descriptor, 4 the archives lack it (searched before), 5 another thread is taking or building it, 6 the archives lack it (searched now)
+static int pso_layout_noarch(void) { static int v = -1; if (v < 0) { v = getenv("DM_DBG_PSO_LAYOUT_NOARCH") != NULL; if (v) MLOG("DM_DBG_PSO_LAYOUT_NOARCH: bases with a vertex layout are not taken from the pipeline archive (a first visit's draws, for tests)"); } return v; }
 static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, NSError **e, int compile) {
     // Do not send conflicting or non-renderable aspect formats to Metal, which can
     // abort instead of returning an NSError (also on the MTLDevice fallback).
@@ -9355,10 +9430,10 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
     // ambient occlusion draws 4 triangles and writes the array layer of each one's primitive ID: every one wrote layer 0, so 3 pixels in 4 had no sun light. A platform limit: the ID has no other source
     if (rast && g_comp4 && [d.label isEqualToString:PSO_WHOLE]) {
         MTL4RenderPipelineDescriptor *whole = pso_desc4(d, 0);
-        if (whole) { if (!compile) return nil; return [g_comp4 newRenderPipelineStateWithDescriptor:whole compilerTaskOptions:nil error:e]; }
+        if (whole) { if (!compile) { t_pb_nil = 2; return nil; } return [g_comp4 newRenderPipelineStateWithDescriptor:whole compilerTaskOptions:nil error:e]; }
     }
     MTL4RenderPipelineDescriptor *b = g_comp4 ? pso_desc4(d, rast) : nil;   // with rasterization off there is no colour state to leave open: the base is the pipeline
-    if (!b) { if (!compile) return nil; g_pb_legacy++; return pso_build_dev(d, e); }
+    if (!b) { if (!compile) { t_pb_nil = 3; return nil; } g_pb_legacy++; return pso_build_dev(d, e); }
     pbase_key bk; pbase_key_of(d, &bk);
     id<MTLRenderPipelineState> base = nil; PbaseBuild *job = nil; int owner = 0, known = 0;   // known: the archives have been searched for it and lack it
     for (;;) {
@@ -9366,13 +9441,13 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
         base = hm_get_id(&g_pbase, &bk); job = nil; owner = 0; known = 0;
         if (!base) {
             known = hm_get_id(&g_pbase_miss, &bk) != nil;
-            if (known && !compile) { os_unfair_lock_unlock(&g_pbase_lock); return nil; }
+            if (known && !compile) { os_unfair_lock_unlock(&g_pbase_lock); t_pb_nil = 4; return nil; }
             job = hm_get_id(&g_pbase_pending, &bk);
             if (!job) { job = [PbaseBuild new]; job->done = dispatch_group_create(); dispatch_group_enter(job->done); hm_put_id(&g_pbase_pending, &bk, job); owner = 1; }
         }
         os_unfair_lock_unlock(&g_pbase_lock);
         if (!job || owner) break;
-        if (!compile) return nil;   // another thread is taking or building it: no wait for the Metal compiler
+        if (!compile) { t_pb_nil = 5; return nil; }   // another thread is taking or building it: no wait for the Metal compiler
         dispatch_group_wait(job->done, DISPATCH_TIME_FOREVER); base = job->ps;
         if (base) break;
         if (job->compiled) { if (e) *e = job->error; return nil; }
@@ -9382,7 +9457,7 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
     else {
         uint64_t t0 = bp_now();
         int vd = 0; for (int i = 0; i < 31 && !vd; i++) vd = bk.va[i][0] != 0;   // a vertex layout (MTLVertexFormatInvalid is 0)
-        int from_run = 0; base = known ? nil : arch_lookup(b, vd, &from_run);
+        int from_run = 0; base = known || (vd && pso_layout_noarch()) ? nil : arch_lookup(b, vd, &from_run);
         uint64_t t1 = bp_now();
         if (base) { g_pb_archived++; g_pt_hit_n++; g_pt_hit_ns += t1 - t0; }
         if (base && from_run && g_compact_enabled && atomic_load(&g_warm_running)) {
@@ -9408,7 +9483,7 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
         else if (!known) hm_put_id(&g_pbase_miss, &bk, NSNull.null);   // searched and not there, compiled or not
         hm_rel(nvn_hm_del(&g_pbase_pending, &bk)); dispatch_group_leave(job->done);
         os_unfair_lock_unlock(&g_pbase_lock);
-        if (!base) { if (compile && e) *e = job->error; return nil; }   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): job stays in g_pbase_pending (hm_put_id's CFBridgingRetain) until hm_rel releases it, not a leak
+        if (!base) { if (compile && e) *e = job->error; t_pb_nil = 6; return nil; }   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): job stays in g_pbase_pending (hm_put_id's CFBridgingRetain) until hm_rel releases it, not a leak
     }
     if (!rast) return base;   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): job stays in g_pbase_pending (hm_put_id's CFBridgingRetain) until hm_rel releases it, not a leak
     uint64_t ts = bp_now();
@@ -9565,12 +9640,15 @@ static __unsafe_unretained id<MTLRenderPipelineState> hybrid_get(const pso_key *
     if (h) return h;
     MTLRenderPipelineDescriptor *d = vs->has_pull ? pso_desc_pull(k, vs, fs) : nil;
     if (!d) return nil;
-    NSError *e = nil; id<MTLRenderPipelineState> ps = pso_build_ex(d, &e, 0);
+    NSError *e = nil; t_pb_nil = 0; id<MTLRenderPipelineState> ps = pso_build_ex(d, &e, 0);
     if (!ps) {   // the pulling base is neither made nor archived: build it in the background for the pair's next miss
         pbase_key bk; pbase_key_of(d, &bk); NSData *kd = [NSData dataWithBytes:&bk length:sizeof bk];
         os_unfair_lock_lock(&g_hy_lock); if (!g_hy_kick_set) g_hy_kick_set = [NSMutableSet set];
         int fresh = ![g_hy_kick_set containsObject:kd]; if (fresh) [g_hy_kick_set addObject:kd]; os_unfair_lock_unlock(&g_hy_lock);
         if (fresh) { g_hy_kicked++; dispatch_async(pp_bg_queue(), ^{ @autoreleasepool { NSError *be = nil; (void)pso_build(d, &be); } }); }
+        static int lg = -1; if (lg < 0) { const char *ev = getenv("DM_PSO_WAITLOG"); lg = ev && !strcmp(ev, "1") ? 400 : 0; }
+        if (lg > 0) { lg--; MLOG("hybrid miss: no pulling base for vertex %s fragment %s (%s; reason %d, %u samples, alpha to coverage %u, border %u, frame %llu)", vs->key, fs ? fs->key : "-", fresh ? "first miss, built in the background now" : "asked before",
+                                t_pb_nil, k->samples, k->a2c, k->border, (unsigned long long)atomic_load(&g_cur_frame)); }
         g_hy_none++; return nil;
     }
     g_hy_made++; hm_put_id(&g_pso_hy, k, ps);
@@ -9599,6 +9677,10 @@ void mtl_pso_line(char *o, size_t n) {
                            (unsigned long long)pf, (unsigned long long)atomic_load(&g_cspf_built), atomic_load(&g_cspf_ns) / 1e6, (unsigned long long)g_cspf_used);
     ppf = pf;
     pca = ca; pcr = cr; pcb = cb; pcl = cl; pcn = cn;
+    static uint64_t ptw; uint64_t tw = atomic_load(&g_twin_found); o2 = strlen(o);   // libraries of the same content under several names (lib_twin_note)
+    if (tw > ptw) snprintf(o + o2, n > o2 ? n - o2 : 0, "; archive lookups answered under another name of a library's content: %llu so far (%llu library files loaded, %llu of them with content another has, digests %.1f ms)",
+                           (unsigned long long)tw, (unsigned long long)g_twin_libs, (unsigned long long)g_twin_shared, atomic_load(&g_twin_ns) / 1e6);
+    ptw = tw;
 }
 
 // ---- Prebuild: the base of every shader pair of the game, into the pipeline archive ----

@@ -21,6 +21,18 @@ class ArchiveRestartTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, phase + '\n' + result.stdout + result.stderr)
                 self.assertEqual(len(list(Path(folder).glob('*.mtl4a'))), files, phase)
 
+    def test_a_base_is_found_under_another_name_of_its_library_content(self):
+        with tempfile.TemporaryDirectory(prefix='pso-twin-') as folder:
+            env = dict(os.environ, DM_PSO_MTL4='1', MTL_DEBUG_LAYER='1')
+            for name in ('DM_GPU_CAPTURE', 'MTL_CAPTURE_ENABLED', 'DM_TEST_ARCHIVE_CONSTANTS', 'DM_TEST_ARCHIVE_MIXED'):
+                env.pop(name, None)
+            # saved under one name; found by a start that loaded the same content under two names; compiled again (a second file) by one that knows only the other name
+            for phase, files in (('seed', 1), ('next', 1), ('alone', 2)):
+                result = subprocess.run([executable, '--twin-' + phase, folder],
+                                        env=env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, phase + '\n' + result.stdout + result.stderr)
+                self.assertEqual(len(list(Path(folder).glob('*.mtl4a'))), files, phase)
+
     def test_cold_start_cut_short(self):
         with tempfile.TemporaryDirectory(prefix='pso-cold-cut-') as folder:
             env = dict(os.environ, DM_PSO_MTL4='1', MTL_DEBUG_LAYER='1')

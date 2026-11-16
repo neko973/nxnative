@@ -26,6 +26,7 @@ DM_CTRL_PROMPT_TEXT	switch	The texts of the controller applet's prompt (a game w
 DM_DBG	diagnostic	When set, prints the guest's `svcOutputDebugString` text to stderr as `[guest]` lines
 DM_DBG_AU_FRAMES	diagnostic	`=<frames>` asks the Mac's Core Audio output for that many frames per callback instead of about 5 ms (1024 reproduces the iOS default that caused crackling)
 DM_DBG_CS_NOARCH	diagnostic	set: every compute pipeline is built without asking a pipeline archive, as on a first visit (to measure `DM_NVN_PREFETCH_CS`)
+DM_DBG_PSO_LAYOUT_NOARCH	diagnostic	set: a base with a vertex layout is built without asking a pipeline archive, so every pipeline's first draw goes through its stand-in as on a first visit (to measure the stand-ins and the pulling bases behind them)
 DM_DETCLOCK	switch	`=<step ns>`: from the first present on, the guest clock advances a fixed step per present instead of following the wall clock, and the random source becomes a fixed-seed stream (replay and test runs)
 DM_DETCLOCK_PACE	switch	`=1` with `DM_DETCLOCK`: each frame takes at least one clock step of wall time, so background loading keeps up with the fixed clock (used by the screenshot gate)
 DM_DISPLAY_NAME	switch	Overrides the iOS app's name in `build_ipa.sh` (default the game name in the base NSP's control data)
@@ -326,7 +327,7 @@ DM_PSO_PREPARE_THREADS	switch	`=<n>`: the workers of the prepare step that build
 DM_PSO_PULL_ALL	diagnostic	`=1`: every draw that has a pulling pipeline draws with it, never with the pipeline for its vertex layout
 DM_PSO_RECORD	path	`=<file>`: appends the shaders and pipelines used in the run to that file, for re-recording the prewarm manifest
 DM_PSO_USER	path	The per-device list of shaders and pipelines built on the spot (default: `pso_user.tsv` in the parent of `DM_SAVE`)
-DM_PSO_WAITLOG	diagnostic	`=1` logs each draw that waited more than 20 ms for its pipeline, with its shader pair and why no stand-in served it
+DM_PSO_WAITLOG	diagnostic	`=1` logs each draw that waited more than 20 ms for its pipeline, with its shader pair and why no stand-in served it, and each stand-in miss (a pair whose pulling base was neither made nor in the archive) with the reason
 DM_QOS_EDGES	switch	`=e1,e2`: the Switch priority edges of `DM_QOS_MAP` (default `44,59`)
 DM_QOS_MAP	switch	`=1` maps guest thread priority to QoS class: ≤ 44 user-interactive, 45–59 user-initiated, the rest utility (off by default: every guest thread runs user-interactive)
 DM_REC	diagnostic	`=<file>`: writes player 1's physical input (keyboard, mouse touches, controllers; never `DM_KEYS` / `DM_CTL`) to the file as `DM_KEYS` steps in presented frames, for replaying a run (`DM_KEYS=@<file>`)

@@ -621,6 +621,30 @@ int main(int argc, char **argv) { @autoreleasepool {
         printf("t_pso_archive %s: %d checks, %d failed\n", argv[1], checks, failed);
         return failed != 0;
     }
+    if (argc == 3 && !strncmp(argv[1], "--twin-", 7)) {   // across fresh processes: a base saved under one name of a library's content is found when the library is loaded under another
+        // seed: the library is fixture.metallib, as above. next: the same file was loaded under two names and the function's descriptor names the other one (Metal gives the two
+        // one function object, noted last for twin.metallib), so the index has no file for the key and the content's other name leads to it. alone: only the other name is known,
+        // as before the names of a content were kept: nothing to ask under, the base is compiled again
+        int seed = !strcmp(argv[1], "--twin-seed"), next = !strcmp(argv[1], "--twin-next");
+        if (!seed) {
+            memset(t_lib_dig, 7, sizeof t_lib_dig);
+            if (next) lib_twin_note(g_lib, @"fixture.metallib");
+            lib_twin_note(g_lib, @"twin.metallib"); lib_tag(g_lib, @"twin.metallib");
+        }
+        pso4_init();
+        uint64_t arch0 = g_pb_archived, built0 = g_pb_built, asks0 = g_arch_asks, twin0 = g_twin_found;
+        MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        cd.vertexDescriptor.layouts[16].stride = 16 * 90;
+        EXPECT("twin names: pipeline", 1, pso_build(cd, &err) != nil);
+        dispatch_sync(g_arch_q, ^{ arch_flush(); }); arch_flush_wait();
+        EXPECT("twin names: from the archive under the content's other name, compiled where the index has no name for it", next, (int)(g_pb_archived - arch0));
+        EXPECT("twin names: compiled otherwise", !next, (int)(g_pb_built - built0));
+        EXPECT("twin names: the lookup counted", next, (int)(g_twin_found - twin0));
+        EXPECT("twin names: one file asked for the base found, none for a miss", next, (int)(g_arch_asks - asks0));
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive %s: %d checks, %d failed\n", argv[1], checks, failed);
+        return failed != 0;
+    }
     // A fresh process is essential: a compiler that built the source archives still has their online binaries.
     if (argc == 3 && !strncmp(argv[1], "--oldname-", 10)) {   // across fresh processes: nine run files named before the count (the test renames them) are compacted once, then not again
         int seed = !strcmp(argv[1], "--oldname-seed"), replay = !strcmp(argv[1], "--oldname-replay");
