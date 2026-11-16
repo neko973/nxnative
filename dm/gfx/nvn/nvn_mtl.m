@@ -6134,6 +6134,7 @@ static void shmap_read(void) {
     NvShader *geo_lean_v[5]; uint8_t geo_lean_tried;   // a geometry shader's lean kernels by input topology (looked up once)
     NvShader *geo_bg_v[5], *geo_bgv_v; uint8_t geo_bg_tried;   // its kernels by input topology (_bg<n>) and its reader (_bgv), looked up once (bit 7: the reader)
     NSMutableDictionary *geo_mesh;   // a vertex shader's mesh entries by lean kernel key (geo_mesh_fn; NSNull: none)
+    uint8_t cps_pf;   // a compute shader whose pipeline the prefetch built when the game made its program (cs_prefetch): its first dispatch writes it to the prewarm lists, as a pipeline built there is
     uint8_t up_mfx;   // a compute shader that is the game's own upscaler (DM_GAME_UPSCALER_KEYS, from the shader map): 0 not decided, 1 drawn by MetalFX when DM_UPSCALER=metalfx, 2 not one or one its colour keeps (up_mfx_wanted)
     uint8_t up_color;   // such a shader's colour, from its code at load with DM_UPSCALER=metalfx (up_mfx_color; UP_COLOR_UNREAD otherwise)
     int gs_loc, lay_loc; char gs_comp, lay_comp;   // a slice-writing geometry shader (no function: the layer comes from input gs_loc.gs_comp) / a vertex shader with layer entry points writing output lay_loc.lay_comp (dmsh_build.py gs_slice, vs_layer_entry); -1 = none
@@ -6225,6 +6226,7 @@ static void mtk_state_note(const pso_key *k0) {
 }
 // The task / mesh / pixel triples the prewarm lists hold a pipeline for. The prewarm builds those in the states they were drawn in, so mtk_predict leaves them alone: built for
 // every program in every state, a start of Ocarina of Time made 1,933 pipelines for 264 programs in 257 s of background time, where its route needed one
+static NSMutableSet<NSString *> *g_cs_listed; static os_unfair_lock g_cs_listed_lock = OS_UNFAIR_LOCK_INIT;   // the compute shaders the prewarm lists name (warm_parse): the prewarm builds their pipelines, the prefetch the others (mtl_prog_prefetch)
 static NSMutableSet<NSString *> *g_mtk_known; static _Atomic int g_mtk_parsed;   // g_mtk_parsed: the lists have been read (warm_parse)
 static NSString *mtk_triple(NSString *t, NSString *m, NSString *f) { return [NSString stringWithFormat:@"%@|%@|%@", t.length ? t : @"-", m, f.length ? f : @"-"]; }
 static void mtk_known_note(NSString *t, NSString *m, NSString *f) {
@@ -9130,6 +9132,7 @@ static int pso4_compiler(void) { pso4_init(); return g_comp4 != nil; }   // rend
 // note. A miss costs a lookup of a fraction of a millisecond per file. g_cps_arch, g_cps_run, g_cps_built: compute pipelines taken from the
 // bundle, from this device's files, built (the prewarm's last lines); g_cps_look_ns, g_cps_build_ns: the time looking up, building
 static _Atomic uint64_t g_cps_arch, g_cps_run, g_cps_built, g_cps_look_ns, g_cps_build_ns;
+static _Atomic uint64_t g_cspf_n, g_cspf_built, g_cspf_ns; static uint64_t g_cspf_used;   // cs_prefetch_on: pipelines made when their program was, those no archive had and their build time; first dispatches that found one (submit thread)
 static void arch_note_new(void);
 static dispatch_queue_t arch_harvest_q(void) {   // one capture at a time, at utility QoS: a network shader's compile can take seconds, beside the game's frames
     static dispatch_queue_t q; static dispatch_once_t once;
@@ -9163,10 +9166,13 @@ static int fd_border_fc(MTL4FunctionDescriptor *fd) {
     MTL4LibraryFunctionDescriptor *l = (MTL4LibraryFunctionDescriptor *)ld;
     return [l.library newFunctionWithName:l.name].functionConstantsDictionary[@"dm_border_off"] != nil;
 }
+static __thread int t_cps_built;   // cps_new built its last pipeline on this thread (no archive had it)
 static id<MTLComputePipelineState> cps_new(id<MTLFunction> f, NSError **e) {
+    t_cps_built = 0;
     pso4_init();
     MTL4FunctionDescriptor *fd = fn4_of(f); MTL4ComputePipelineDescriptor *d = nil; id<MTLComputePipelineState> ps = nil; uint64_t t0 = bp_now();
-    if ([fd isKindOfClass:MTL4LibraryFunctionDescriptor.class] || fd_border_fc(fd)) {   // a specialized one: fn_spec's or bd_off's, of a function with the border constant
+    static int noarch = -1; if (noarch < 0) noarch = getenv("DM_DBG_CS_NOARCH") != NULL;   // test switch: every compute pipeline is built, as on a first visit (no archive is asked)
+    if (!noarch && ([fd isKindOfClass:MTL4LibraryFunctionDescriptor.class] || fd_border_fc(fd))) {   // a specialized one: fn_spec's or bd_off's, of a function with the border constant
         d = [MTL4ComputePipelineDescriptor new]; d.computeFunctionDescriptor = fd;
         if (g_arch_bundle && (ps = [g_arch_bundle newComputePipelineStateWithDescriptor:d error:nil])) atomic_fetch_add(&g_cps_arch, 1);
         else { int from_run = 0; if ((ps = arch_lookup(d, 1, &from_run))) {   // arch_capture_cs writes them to plain files only
@@ -9178,7 +9184,7 @@ static id<MTLComputePipelineState> cps_new(id<MTLFunction> f, NSError **e) {
     }
     uint64_t t1 = bp_now();
     ps = [g_dev newComputePipelineStateWithFunction:fn_dev(f) error:e];
-    if (ps) { atomic_fetch_add(&g_cps_built, 1); atomic_fetch_add(&g_cps_build_ns, bp_now() - t1); arch_harvest(d, 0); }
+    if (ps) { t_cps_built = 1; atomic_fetch_add(&g_cps_built, 1); atomic_fetch_add(&g_cps_build_ns, bp_now() - t1); arch_harvest(d, 0); }
     return ps;
 }
 // Writes one flush period's captures as the next file of the archive, on g_arch_q once every compile in the period has returned
@@ -9588,6 +9594,10 @@ void mtl_pso_line(char *o, size_t n) {
     if (ca > pca || cr > pcr || cb > pcb)
         snprintf(o + o2, n > o2 ? n - o2 : 0, "; compute pipelines from the archive bundled with the app %llu, from this device's archive %llu, built %llu (%.1f ms looking up, %.1f ms building)",
                  (unsigned long long)(ca - pca), (unsigned long long)(cr - pcr), (unsigned long long)(cb - pcb), (cl - pcl) / 1e6, (cn - pcn) / 1e6);
+    static uint64_t ppf; uint64_t pf = atomic_load(&g_cspf_n); o2 = strlen(o);
+    if (pf > ppf) snprintf(o + o2, n > o2 ? n - o2 : 0, "; compute pipelines made in the background when their program was: %llu so far (%llu no archive had, %.1f ms building), %llu met by a dispatch",
+                           (unsigned long long)pf, (unsigned long long)atomic_load(&g_cspf_built), atomic_load(&g_cspf_ns) / 1e6, (unsigned long long)g_cspf_used);
+    ppf = pf;
     pca = ca; pcr = cr; pcb = cb; pcl = cl; pcn = cn;
 }
 
@@ -10025,6 +10035,7 @@ static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) 
             WarmTask *t = nil;
             if (([c[0] isEqualToString:@"S"] && c.count >= 3) || ([c[0] isEqualToString:@"C"] && c.count >= 2)) {
                 if (!c[1].length || warm_stale(c[1], stale)) continue;
+                if ([c[0] isEqualToString:@"C"]) { os_unfair_lock_lock(&g_cs_listed_lock); if (!g_cs_listed) g_cs_listed = [NSMutableSet set]; [g_cs_listed addObject:c[1]]; os_unfair_lock_unlock(&g_cs_listed_lock); }
                 if ([c[0] isEqualToString:@"C"] && ndve_engine_key(c[1].UTF8String)) { ndve_rows++; continue; }   // run by the host's NDVE engine: never built (ndve_engine_key)
                 t = [WarmTask new]; t->kind = [c[0] isEqualToString:@"S"] ? 0 : 2; t->key = c[1]; t->stage = t->kind ? 5 : c[2].intValue; [tasks addObject:t];
             } else if ([c[0] isEqualToString:@"R"] && c.count >= 2) {
@@ -14700,7 +14711,7 @@ static void warm_claim(void) {
             NvShader *cs = g_shcache[item->key];
             if (!cs) { cs = item->shader; if (!g_shcache) g_shcache = [NSMutableDictionary dictionary]; g_shcache[item->key] = cs; }
             cps_key key = {(__bridge const void *)cs, 1};   // warm_task built the common function, without the border corrections
-            if (!hm_get_id(&g_cps, &key)) { hm_put_id(&g_cps, &key, item->object); g_warm_claim_cps++; }
+            if (!hm_get_id(&g_cps, &key)) { hm_put_id(&g_cps, &key, item->object); g_warm_claim_cps++; if (item->record) cs->cps_pf = 1; }
         }
     }
 }
@@ -14765,6 +14776,14 @@ static void mtk_predict(NSString *tkey, NSString *mkey, NSString *fkey) {
 // takes them (warm_claim) instead of its first draw loading each on the submit thread: in Donkey Kong Bananza a level's first frames loaded 3 to 7 libraries there, 20-90 ms
 // with the drive idle and up to 4 s with it busy. A draw that comes before its library has loaded loads it itself, as before. DM_NVN_PREFETCH=0 turns it off
 static _Atomic uint64_t g_progpf_loaded;
+// A compute shader's pipeline too. It is the shader alone (no pass state), so it is whole when the program is made, and it has no stand-in: a dispatch waits for it (cs_pipeline).
+// Ocarina of Time on an M3 Pro, a 50-minute session through places new to the player: 106 compute pipelines built at their first dispatch, 8.1 s of the 12.7 s the submit thread
+// spent in pipelines and the largest part of the 21 s lost in frames over 50 ms. Built here in the background, the common function as the prewarm's C rows build it (warm_task),
+// and claimed by the submit thread the same way; a dispatch that comes first builds it itself, as before. Left out: the shaders the prewarm lists name (the prewarm builds
+// those: asked for by both at once, 19 of 422 were built a second time while the game started), the movie network the host's engine runs and the game's upscaler when
+// MetalFX draws it, which no dispatch builds either. The game makes about 840 compute programs by the first area and the lists hold about 2,400 shaders. Its first dispatch writes the C row (dispatch). DM_NVN_PREFETCH_CS=0 turns it off
+static int cs_prefetch_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PREFETCH_CS"); v = !(e && !strcmp(e, "0")); } return v; }
+static int up_mfx_on(void); static int up_mfx_named(NvShader *cs);
 static int prefetch_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PREFETCH"); v = !(e && !strcmp(e, "0")); } return v; }
 void mtl_prog_prefetch(const prog_t *cp) {
     prog_t *p = (prog_t *)cp;
@@ -14784,6 +14803,20 @@ void mtl_prog_prefetch(const prog_t *cp) {
             if (sh && st == 0 && sh->has_pull && !sh->layer_out && hybrid_on()) pull_load(sh);   // its pulling entry too, as the prewarm does (warm_shader)
             if (!sh) return;
             WarmItem *item = [WarmItem new]; item->kind = 0; item->record = 1; item->key = pc; item->shader = sh; warm_enqueue(item);
+            if (st == 5 && sh->fn && cs_prefetch_on() && !ndve_engine_key(pc.UTF8String) && !(DM_GAME_UPSCALER_N && up_mfx_on() && up_mfx_named(sh))) {
+                // The lists first, as mtk_predict waits for them; with no list, 20 s once and then every shader
+                static _Atomic int nolist;
+                for (int i = 0; i < 400 && !atomic_load(&g_mtk_parsed) && !atomic_load(&nolist); i++) usleep(50000);
+                if (!atomic_load(&g_mtk_parsed)) atomic_store(&nolist, 1);
+                os_unfair_lock_lock(&g_cs_listed_lock); BOOL listed = [g_cs_listed containsObject:pc]; os_unfair_lock_unlock(&g_cs_listed_lock);
+                if (listed) return;
+                NSError *e = nil; uint64_t t0 = bp_now(); id<MTLComputePipelineState> ps = cps_new(bd_off(sh->fn), &e);
+                if (ps) {
+                    WarmItem *ci = [WarmItem new]; ci->kind = 2; ci->record = 1; ci->key = pc; ci->shader = sh; ci->object = ps; warm_enqueue(ci);
+                    if (t_cps_built) { atomic_fetch_add(&g_cspf_built, 1); atomic_fetch_add(&g_cspf_ns, bp_now() - t0); }
+                    if (!atomic_fetch_add(&g_cspf_n, 1)) MLOG("compute pipeline prefetch at program creation: first pipeline %s made in the background (DM_NVN_PREFETCH_CS=0 turns it off)", pc.UTF8String);
+                }
+            }
             if (!g_progpf_loaded++) MLOG("shader prefetch at program creation: first library %s loaded in the background (DM_NVN_PREFETCH=0 turns it off)", pc.UTF8String);
         } });
     }
@@ -14881,6 +14914,7 @@ static void dispatch(const p_dispatch *dp) {
     image_prepare(prog_get(S.cprog), 0x20);
     if (ndve_engine_dispatch(cs, dp)) return;   // nn::ndve's movie network as the host's kernels (DM_NDVE_ENGINE=1)
     if (up_mfx_wanted(cs) && !dp->ind && up_mfx_encode(cs)) return;   // the game's upscaler, drawn by MetalFX instead (DM_UPSCALER=metalfx)
+    if (ps && cs->cps_pf) { cs->cps_pf = 0; g_cspf_used++; pso_record("C\t%s\n", cs->key); if (cs->key[0]) pso_user_record("C\t%s\n", cs->key); }   // the prefetch built it: listed at its first dispatch, as cs_pipeline lists the ones built here
     if (!ps && !(ps = cs_pipeline(cs, k, off))) return;
     // Threadgroup memory past Metal's 32 KB, in a device buffer (dmsh_rewrite.py tg_spill): a slice for every workgroup of the grid. An indirect dispatch's grid is in GPU memory, written earlier
     // in the frame: the replay waits for the GPU (as an indirect-count multi-draw does, mdi_wait) and reads it. Mario Kart World's spilled dispatches are all direct, of 1 to 3 workgroups

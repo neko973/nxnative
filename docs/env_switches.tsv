@@ -25,6 +25,7 @@ DM_CTL	diagnostic	`=<file>` (Mac): the host polls the file every 100 ms and runs
 DM_CTRL_PROMPT_TEXT	switch	The texts of the controller applet's prompt (a game wants more players than have joined; `ctrl_prompt.h`) in the player's language, one per line: the title, the hint, the count, the done and the cancel button, with `{min}`, `{max}` and `{joined}` replaced by the numbers; a front end sets it ([Starting a game](frontends.md#starting-a-game)), an empty or missing line keeps the English text
 DM_DBG	diagnostic	When set, prints the guest's `svcOutputDebugString` text to stderr as `[guest]` lines
 DM_DBG_AU_FRAMES	diagnostic	`=<frames>` asks the Mac's Core Audio output for that many frames per callback instead of about 5 ms (1024 reproduces the iOS default that caused crackling)
+DM_DBG_CS_NOARCH	diagnostic	set: every compute pipeline is built without asking a pipeline archive, as on a first visit (to measure `DM_NVN_PREFETCH_CS`)
 DM_DETCLOCK	switch	`=<step ns>`: from the first present on, the guest clock advances a fixed step per present instead of following the wall clock, and the random source becomes a fixed-seed stream (replay and test runs)
 DM_DETCLOCK_PACE	switch	`=1` with `DM_DETCLOCK`: each frame takes at least one clock step of wall time, so background loading keeps up with the fixed clock (used by the screenshot gate)
 DM_DISPLAY_NAME	switch	Overrides the iOS app's name in `build_ipa.sh` (default the game name in the base NSP's control data)
@@ -202,6 +203,7 @@ DM_NVN_POOL_STANDIN	switch	`0` leaves the dummy (reads 0) in the pool tables for
 DM_NVN_POOL_HEAP	switch	`0` gives every shared render target of a CPU_NO_ACCESS pool a Metal allocation of its own, as before; by default the COMPRESSIBLE textures of such a pool (up to 1 GB) share one placement heap, each at its pool offset scaled by 1.25, so render targets an engine places over each other share memory as on NVN (`pool_heap_texture`)
 DM_NVN_PREDICT	switch	`0` turns off the parallel precompile look-ahead: a pipeline miss compiles only the pipeline it needs
 DM_NVN_PREFETCH	switch	`0` turns off loading a program's shader libraries in the background when the game makes it (`nvnProgramSetShaders`); they load at its first draw instead
+DM_NVN_PREFETCH_CS	switch	`0` turns off building a compute shader's pipeline in the background when the game makes its program; it is built at its first dispatch instead
 DM_NVN_PROF	diagnostic	`=1` wraps the implemented NVN functions in a timing wrapper and collects the time each takes during recording
 DM_NVN_PROGTRACE	diagnostic	`=<vertex keys,...>` logs matching ProgramSetShaders calls and their guest backtraces
 DM_NVN_REGLUM	diagnostic	`=x0,y0,x1,y1:<file>` (normalized coordinates): on every present records the present number, time, mean luminance and a grayscale thumbnail of that region, to check animation speed against frame rate
