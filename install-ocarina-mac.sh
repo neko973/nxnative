@@ -164,6 +164,7 @@ print("launcher and Game Mode host:", pack_app.update_launcher(sys.argv[2]))
   echo "  \"$KEEP\"; delete that folder once the game runs."
   echo "- The first start may prepare a few more pipelines behind the progress screen (seconds, not minutes)."
   echo "- In the settings window: Full resolution (off unless you turn it on), Texture filtering, Texture size, Game Mode and Game's upscaler (MetalFX unless you change it; no longer fixed); Render scale now counts from the game's own size (docs/settings.md says what they do)."
+  echo "- Picture shape (MacBook 16:10: the picture fills the screen under the notch) shows only in an app installed from the dump on or after 2026-11-22: it needs the game's code patched again, which an update cannot do. To get it, run the full install once more:  ./install-ocarina-mac.sh /path/to/your/dump"
 }
 
 # The app's Check for Updates (dm/mac/Launcher.swift) runs these two. PROGRESS <percent> <text> lines are for its bar
